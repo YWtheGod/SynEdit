@@ -27,8 +27,6 @@
   replace them with the notice and other provisions required by the GPL.
   If you do not delete the provisions above, a recipient may use your version
   of this file under either the MPL or the GPL.
-
-  Known Issues:
   ------------------------------------------------------------------------------- }
 
 unit SynEditMiscClasses;
@@ -39,10 +37,11 @@ interface
 
 uses
   System.Types,
+  System.UITypes,
   System.SysUtils,
   System.Classes,
   System.Math,
-  System.Win.Registry,
+  System.Generics.Collections,
   Winapi.Windows,
   Winapi.Messages,
   Winapi.D2D1,
@@ -83,6 +82,7 @@ type
       default True;
   end;
 
+  {$REGION 'Indentation Guides'}
   TSynIdentGuidesStyle = (igsSolid, igsDotted);
 
   TSynIndentGuides = class(TPersistent)
@@ -105,10 +105,13 @@ type
     property Color: TColor read FColor write SetColor
       default clMedGray;
   end;
+  {$ENDREGION 'Indentation Guides'}
+
+  {$REGION 'Bands'}
 
   TSynGutterBorderStyle = (gbsNone, gbsMiddle, gbsRight);
 
-  TGutterBandPaintEvent = procedure(Canvas: TCanvas; ClipR: TRect;
+  TGutterBandPaintEvent = procedure(RT: ID2D1RenderTarget; ClipR: TRect;
     const FirstRow, LastRow: Integer; var DoDefaultPainting: Boolean) of object;
 
   TGutterBandClickEvent = procedure(Sender: TObject; Button: TMouseButton;
@@ -176,17 +179,17 @@ type
     FOnMouseCursor: TGutterMouseCursorEvent;
     function GetSynGutter: TSynGutter;
     function GetEditor: TPersistent;
-    procedure DoPaintLines(Canvas: TCanvas; ClipR: TRect; const FirstRow,
+    procedure DoPaintLines(RT: ID2D1RenderTarget; ClipR: TRect; const FirstRow,
       LastRow: Integer);
-    procedure PaintMarks(Canvas: TCanvas; ClipR: TRect;
+    procedure PaintMarks(RT: ID2D1RenderTarget; ClipR: TRect;
       const FirstRow, LastRow: Integer);
-    procedure PaintLineNumbers(Canvas: TCanvas; ClipR: TRect;
+    procedure PaintLineNumbers(RT: ID2D1RenderTarget; ClipR: TRect;
       const FirstRow, LastRow: Integer);
-    procedure PaintFoldShapes(Canvas: TCanvas; ClipR: TRect;
+    procedure PaintFoldShapes(RT: ID2D1RenderTarget; ClipR: TRect;
       const FirstRow, LastRow: Integer);
-    procedure PaintMargin(Canvas: TCanvas; ClipR: TRect;
+    procedure PaintMargin(RT: ID2D1RenderTarget; ClipR: TRect;
       const FirstRow, LastRow: Integer);
-    procedure PaintTrackChanges(Canvas: TCanvas; ClipR: TRect;
+    procedure PaintTrackChanges(RT: ID2D1RenderTarget; ClipR: TRect;
       const FirstRow, LastRow: Integer);
     procedure SetBackground(const Value: TSynGutterBandBackground);
     procedure SetVisible(const Value: Boolean);
@@ -207,7 +210,7 @@ type
     constructor Create(Collection: TCollection); override;
     procedure Assign(Source: TPersistent); override;
     function RealWidth: Integer;
-    procedure PaintLines(Canvas: TCanvas; ClipR: TRect; const FirstRow, LastRow:
+    procedure PaintLines(RT: ID2D1RenderTarget; ClipR: TRect; const FirstRow, LastRow:
         Integer);
     procedure DoClick(Sender: TObject; Button: TMouseButton;
       X, Y, Row, Line: Integer);
@@ -238,9 +241,11 @@ type
   public
     property Bands[Index: Integer]: TSynGutterBand read GetBands; default;
   end;
+  {$ENDREGION 'Bands'}
 
   TSynInternalImage = class;
 
+  {$REGION 'TSynGutter'}
   TSynGutter = class(TPersistent)
   private
     [Weak]
@@ -345,6 +350,7 @@ type
     property Bands: TSynBandsCollection read FBands write SetBands;
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
   end;
+  {$ENDREGION 'TSynGutter'}
 
   TSynBookMarkOpt = class(TPersistent)
   private
@@ -364,9 +370,7 @@ type
   public
     constructor Create(AOwner: TComponent);
     procedure Assign(Source: TPersistent); override;
-    // ++ DPI-Aware
     procedure ChangeScale(M, D: Integer); virtual;
-    // -- DPI-Aware
   published
     property BookmarkImages: TCustomImageList read FBookmarkImages
       write SetBookmarkImages;
@@ -449,20 +453,20 @@ type
 
   TSynInternalImage = class(TObject)
   private
-    FImages: TBitmap;
+    FImages: IWicBitmap;
+    FScaledImages: IWicBitmap;
     FWidth: Integer;
     FHeight: Integer;
     FCount: Integer;
   public
     constructor Create(aModule: THandle; const Name: string; Count: Integer);
-    destructor Destroy; override;
-    procedure Draw(aCanvas: TCanvas; Number, X, Y, LineHeight: Integer);
+    procedure Draw(RT: ID2D1RenderTarget; Number, X, Y, LineHeight: Integer);
     // ++ DPI-Aware
     procedure ChangeScale(M, D: Integer); virtual;
     // -- DPI-Aware
   end;
 
-  { TSynHotKey }
+  {$REGION 'TSynHotKey'}
 
 const
   BorderWidth = 0;
@@ -512,6 +516,7 @@ type
     property Modifiers: THKModifiers read FModifiers write SetModifiers
       default [hkAlt];
   end;
+  {$ENDREGION 'TSynHotKey'}
 
   TSynEditSearchCustom = class(TComponent)
   protected
@@ -534,13 +539,58 @@ type
     property Options: TSynSearchOptions write SetOptions;
   end;
 
-  TBetterRegistry = class(TRegistry)
-    function OpenKeyReadOnly(const Key: string): Boolean;
+  {$REGION 'Indicators'}
+
+  TSynIndicatorStyle = (sisTextDecoration, sisSquiggleMicrosoftWord,
+    sisSquiggleWordPerfect, sisRectangle, sisFilledRectangle,
+    sisRoundedRectangle, sisRoundedFilledRectangle);
+
+  TSynIndicatorSpec = record
+    Style: TSynIndicatorStyle;
+    Foreground,
+    Background: TD2D1ColorF;
+    FontStyle: TFontStyles;
   end;
 
-  // ++ DPI-Aware
-procedure ResizeBitmap(Bitmap: TBitmap; const NewWidth, NewHeight: Integer);
-// -- DPI-Aware
+  TSynIndicator = record
+    Id: TGuid;
+    CharStart, CharEnd : Integer;
+    constructor Create(aId: TGuid; aCharStart, aCharEnd: Integer);
+    class operator Equal(const A, B: TSynIndicator): Boolean;
+  end;
+
+  TSynIndicators = class
+  private
+    FOwner: TCustomControl;
+    FRegister: TDictionary<TGUID, TSynIndicatorSpec>;
+    FList: TDictionary<Integer, TArray<TSynIndicator>>;
+    procedure InvalidateIndicator(Line: Integer; Indicator: TSynIndicator);
+  public
+    constructor Create(Owner: TCustomControl);
+    destructor Destroy; override;
+    procedure RegisterSpec(Id: TGuid; Spec: TSynIndicatorSpec);
+    function GetSpec(Id: TGUID): TSynIndicatorSpec;
+    procedure Add(Line: Integer; Indicator: TSynIndicator; Invalidate: Boolean = True);
+    // Clears all indicators
+    procedure Clear; overload;
+    // Clears all indicators with a given Id
+    procedure Clear(Id: TGuid; Invalidate: Boolean = True; Line: Integer = -1);
+        overload;
+    // Clears just one indicator
+    procedure Clear(Line: Integer; const Indicator: TSynIndicator); overload;
+    // Returns the indicators of a given line
+    function LineIndicators(Line: Integer): TArray<TSynIndicator>;
+    // Return the indicator at a given buffer or window position
+    function IndicatorAtPos(Pos: TBufferCoord; var Indicator: TSynIndicator): Boolean;
+    function IndicatorAtMousePos(MousePos: TPoint; var Indicator: TSynIndicator): Boolean;
+    // Should only used by Synedit
+    procedure LinesInserted(FirstLine, Count: Integer);
+    procedure LinesDeleted(FirstLine, Count: Integer);
+    procedure LinePut(aIndex: Integer);
+    class procedure Paint(RT: ID2D1RenderTarget; Spec: TSynIndicatorSpec; const
+        ClipR: TRect; StartOffset: Integer);
+  end;
+  {$ENDREGION 'TSynIndicators'}
 
 implementation
 
@@ -552,52 +602,7 @@ uses
   SynEdit,
   SynEditTextBuffer;
 
-{$IF CompilerVersion <= 34}
-procedure ResizeBitmap(Bitmap: TBitmap; const NewWidth, NewHeight: integer);
-var
-  buffer: TBitmap;
-begin
-  buffer := TBitmap.Create;
-  try
-    buffer.SetSize(NewWidth, NewHeight);
-    buffer.Canvas.StretchDraw(Rect(0, 0, NewWidth, NewHeight), Bitmap);
-    Bitmap.SetSize(NewWidth, NewHeight);
-    Bitmap.Canvas.Draw(0, 0, buffer);
-  finally
-    buffer.Free;
-  end;
-end;
-{$ELSE}
-// ++ DPI-Aware
-procedure ResizeBitmap(Bitmap: TBitmap; const NewWidth, NewHeight: Integer);
-var
-  Factory: IWICImagingFactory;
-  Scaler: IWICBitmapScaler;
-  Source: TWICImage;
-begin
-  Bitmap.AlphaFormat := afDefined;
-  Source := TWICImage.Create;
-  try
-    Source.Assign(Bitmap);
-    Factory := TSynDWrite.ImagingFactory;
-    Factory.CreateBitmapScaler(Scaler);
-    try
-      Scaler.Initialize(Source.Handle, NewWidth, NewHeight,
-        WICBitmapInterpolationModeHighQualityCubic);
-      Source.Handle := IWICBitmap(Scaler);
-    finally
-      Scaler := nil;
-      Factory := nil;
-    end;
-    Bitmap.Assign(Source);
-  finally
-    Source.Free;
-  end;
-end;
-// -- DPI-Aware
-{$ENDIF}
-
-{ TSynSelectedColor }
+{$REGION 'TSynSelectedColor'}
 
 constructor TSynSelectedColor.Create;
 begin
@@ -665,7 +670,10 @@ begin
   end;
 end;
 
-{ TSynGutter }
+{$ENDREGION}
+
+
+{$REGION 'TSynGutter'}
 
 procedure TSynGutter.Changed;
 begin
@@ -1072,15 +1080,16 @@ begin
   Result := FOwner;
 end;
 
-{ TSynBookMarkOpt }
+{$ENDREGION}
 
-// ++ DPI-Aware
+
+{$REGION 'TSynBookMarkOpt'}
+
 procedure TSynBookMarkOpt.ChangeScale(M, D: Integer);
 begin
   FLeftMargin := MulDiv(FLeftMargin, M, D);
   FXoffset := MulDiv(FXoffset, M, D);
 end;
-// -- DPI-Aware
 
 constructor TSynBookMarkOpt.Create(AOwner: TComponent);
 begin
@@ -1165,7 +1174,10 @@ begin
   end;
 end;
 
-{ TSynGlyph }
+{$ENDREGION}
+
+
+{$REGION 'TSynGlyph'}
 
 procedure TSynGlyph.ChangeScale(M, D: Integer);
 begin
@@ -1260,7 +1272,10 @@ begin
   end;
 end;
 
-{ TSynMethodChain }
+{$ENDREGION}
+
+
+{$REGION 'TSynMethodChain'}
 
 procedure TSynMethodChain.Add(AEvent: TMethod);
 begin
@@ -1353,7 +1368,10 @@ begin
   end;
 end;
 
-{ TSynNotifyEventChain }
+{$ENDREGION}
+
+
+{$REGION 'TSynNotifyEventChain'}
 
 procedure TSynNotifyEventChain.Add(AEvent: TNotifyEvent);
 begin
@@ -1376,7 +1394,10 @@ begin
   inherited Remove(TMethod(AEvent));
 end;
 
-{ TSynInternalImage }
+{$ENDREGION}
+
+
+{$REGION 'TSynInternalImage'}
 
 type
   TInternalResource = class(TObject)
@@ -1392,31 +1413,34 @@ begin
     Exit;
 
   FWidth := MulDiv(FWidth, M, D);
-  ResizeBitmap(FImages, FWidth * FCount, MulDiv(FImages.Height, M, D));
-  FHeight := FImages.Height;
+  FHeight := MulDiv(FHeight, M, D);
+  FScaledImages := ScaledWicBitmap(FImages, FCount * FWidth, FHeight);
 end;
 
 constructor TSynInternalImage.Create(aModule: THandle; const Name: string;
   Count: Integer);
+var
+ BM: TBitmap;
 begin
   inherited Create;
-  FImages := TBitmap.Create;
-  FImages.LoadFromResourceName(aModule, Name);
-  FWidth := (FImages.Width + Count shr 1) div Count;
-  FHeight := FImages.Height;
-  FCount := Count;
+  BM := TBitmap.Create;
+  try
+    BM.LoadFromResourceName(aModule, Name);
+    FWidth := (BM.Width + Count shr 1) div Count;
+    FHeight := BM.Height;
+    FCount := Count;
+    FImages := WicBitmapFromBitmap(BM);
+    FScaledImages := FImages;
+  finally
+    BM.Free;
+  end;
 end;
 
-destructor TSynInternalImage.Destroy;
-begin
-  FImages.Free;
-  inherited Destroy;
-end;
-
-procedure TSynInternalImage.Draw(aCanvas: TCanvas;
+procedure TSynInternalImage.Draw(RT: ID2D1RenderTarget;
   Number, X, Y, LineHeight: Integer);
 var
-  rcSrc, rcDest: TRect;
+  rcSrc, rcDest: TRectF;
+  BM: ID2D1Bitmap;
 begin
   if (Number >= 0) and (Number < FCount) then
   begin
@@ -1432,11 +1456,15 @@ begin
       Y := (FHeight - LineHeight) div 2;
       rcSrc := Rect(Number * FWidth, Y, (Number + 1) * FWidth, Y + LineHeight);
     end;
-    DrawTransparentBitmap(FImages, rcSrc, aCanvas, rcDest, 255);
+    CheckOSError(RT.CreateBitmapFromWicBitmap(FScaledImages, nil, BM));
+    RT.DrawBitmap(BM, @rcDest, 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, @rcSrc);
   end;
 end;
 
-{ TSynHotKey }
+{$ENDREGION}
+
+
+{$REGION 'TSynHotKey'}
 
 function KeySameAsShiftState(Key: Word; Shift: TShiftState): Boolean;
 begin
@@ -1657,36 +1685,6 @@ begin
   ShowCaret(Handle);
 end;
 
-{ TBetterRegistry }
-
-function TBetterRegistry.OpenKeyReadOnly(const Key: string): Boolean;
-
-  function IsRelative(const Value: string): Boolean;
-  begin
-    Result := not((Value <> '') and (Value[1] = '\'));
-  end;
-
-var
-  TempKey: HKey;
-  S: string;
-  Relative: Boolean;
-begin
-  S := Key;
-  Relative := IsRelative(S);
-
-  if not Relative then
-    Delete(S, 1, 1);
-  TempKey := 0;
-  Result := RegOpenKeyEx(GetBaseKey(Relative), PChar(S), 0, KEY_READ, TempKey)
-    = ERROR_SUCCESS;
-  if Result then
-  begin
-    if (CurrentKey <> 0) and Relative then
-      S := CurrentPath + '\' + S;
-    ChangeKey(TempKey, S);
-  end;
-end; { TBetterRegistry.OpenKeyReadOnly }
-
 { TSynEditSearchCustom }
 
 // possibility to preprocess search expression before is send to SynEdit.SearchReplace()
@@ -1696,7 +1694,10 @@ begin
   Result := AReplace;
 end;
 
-{ TSynGutterBand }
+{$ENDREGION}
+
+
+{$REGION 'TSynGutterBand'}
 
 procedure TSynGutterBand.Assign(Source: TPersistent);
 var
@@ -1772,21 +1773,21 @@ begin
     FOnMouseCursor(Sender, X, Y, Row, Line, Cursor);
 end;
 
-procedure TSynGutterBand.DoPaintLines(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
+procedure TSynGutterBand.DoPaintLines(RT: ID2D1RenderTarget; ClipR: TRect;
+    const FirstRow, LastRow: Integer);
 // Drawing of builtin bands
 begin
   case FKind of
     gbkMarks:
-      PaintMarks(Canvas, ClipR, FirstRow, LastRow);
+      PaintMarks(RT, ClipR, FirstRow, LastRow);
     gbkLineNumbers:
-      PaintLineNumbers(Canvas, ClipR, FirstRow, LastRow);
+      PaintLineNumbers(RT, ClipR, FirstRow, LastRow);
     gbkFold:
-      PaintFoldShapes(Canvas, ClipR, FirstRow, LastRow);
+      PaintFoldShapes(RT, ClipR, FirstRow, LastRow);
     gbkTrackChanges:
-      PaintTrackChanges(Canvas, ClipR, FirstRow, LastRow);
+      PaintTrackChanges(RT, ClipR, FirstRow, LastRow);
     gbkMargin:
-      PaintMargin(Canvas, ClipR, FirstRow, LastRow);
+      PaintMargin(RT, ClipR, FirstRow, LastRow);
   end;
 end;
 
@@ -1895,22 +1896,21 @@ begin
   Result := not(FKind in [gbkLineNumbers, gbkFold, gbkTrackChanges]);
 end;
 
-procedure TSynGutterBand.PaintFoldShapes(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
-const
-  PlusMinusMargin = 2;
+procedure TSynGutterBand.PaintFoldShapes(RT: ID2D1RenderTarget; ClipR: TRect;
+    const FirstRow, LastRow: Integer);
 var
   SynEdit: TCustomSynEdit;
   vLine: Integer;
   cRow: Integer;
   rcFold: TRect;
-  X: Integer;
+  X, Y: Integer;
   FoldRange: TSynFoldRange;
   Index: Integer;
   Margin: Integer;
   PMMargin: Integer;
   ShapeSize: Integer;
   PPI: Integer;
+  Brush: ID2D1Brush;
 begin
   SynEdit := TCustomSynEdit(Editor);
   Assert(Assigned(SynEdit));
@@ -1921,10 +1921,12 @@ begin
   if SynEdit.UseCodeFolding then
   begin
     Margin := MulDiv(MarginX, PPI, 96);
-    PMMargin := MulDiv(PlusMinusMargin, PPI, 96);
-
+    PMMargin := Margin div 2;
     ShapeSize := SynEdit.CodeFolding.ScaledGutterShapeSize(PPI);
 
+    Brush := TSynDWrite.SolidBrush(SynEdit.CodeFolding.FolderBarLinesColor);
+
+    RT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     for cRow := FirstRow to LastRow do
     begin
       vLine := SynEdit.RowToLine(cRow);
@@ -1935,35 +1937,37 @@ begin
       rcFold.TopLeft := Point(ClipR.Left + Margin, (cRow - SynEdit.TopLine) *
         SynEdit.LineHeight + (SynEdit.LineHeight - ShapeSize) div 2);
       rcFold.BottomRight := rcFold.TopLeft;
-      rcFold.BottomRight.Offset(ShapeSize, ShapeSize);
-
-      Canvas.Pen.Color := SynEdit.CodeFolding.FolderBarLinesColor;
+      // Direct2D includes both the first and the last point in the rectangle!
+      rcFold.BottomRight.Offset(ShapeSize - 1, ShapeSize - 1);
 
       // Any fold ranges beginning on this line?
       if SynEdit.AllFoldRanges.FoldStartAtLine(vLine, Index) then
       begin
         FoldRange := SynEdit.AllFoldRanges.Ranges[Index];
-        Canvas.Brush.Color := SynEdit.CodeFolding.FolderBarLinesColor;
-        Canvas.FrameRect(rcFold);
+        // Paint the square
+        RT.DrawRectangle(rcFold, Brush);
 
         // Paint minus sign
-        Canvas.Pen.Color := SynEdit.CodeFolding.FolderBarLinesColor;
-        Canvas.MoveTo(rcFold.Left + PMMargin, rcFold.Top + ShapeSize div 2);
-        Canvas.LineTo(rcFold.Right - PMMargin, rcFold.Top + ShapeSize div 2);
+        Y := rcFold.Top + ShapeSize div 2;
+        // DrawLine paints the last pixel as well in Direct2D
+        RT.DrawLine(
+          Point(rcFold.Left + PMMargin, Y),
+          Point(rcFold.Right - PMMargin - 1, Y), Brush);
 
         // Paint vertical line of plus sign
         if FoldRange.Collapsed then
         begin
           X := rcFold.Left + ShapeSize div 2;
-          Canvas.MoveTo(X, rcFold.Top + PMMargin);
-          Canvas.LineTo(X, rcFold.Bottom - PMMargin);
+          RT.DrawLine(
+            Point(X, rcFold.Top  + PMMargin),
+            Point(X, rcFold.Bottom - PMMargin - 1), Brush);
         end
         else
         // Draw the bottom part of a line
         begin
           X := rcFold.Left + ShapeSize div 2;
-          Canvas.MoveTo(X, rcFold.Bottom);
-          Canvas.LineTo(X, (cRow - SynEdit.TopLine + 1) * SynEdit.LineHeight);
+          RT.DrawLine(D2D1PointF(X, rcFold.Bottom),
+            D2D1PointF(X, (cRow - SynEdit.TopLine + 1) * SynEdit.LineHeight), Brush);
         end;
       end
       else
@@ -1972,25 +1976,33 @@ begin
         if SynEdit.AllFoldRanges.FoldEndAtLine(vLine, Index) then
         begin
           X := rcFold.Left + ShapeSize div 2;
-          Canvas.MoveTo(X, (cRow - SynEdit.TopLine) * SynEdit.LineHeight);
-          Canvas.LineTo(X, rcFold.Top + ((rcFold.Bottom - rcFold.Top) div 2));
-          Canvas.LineTo(rcFold.Right,
-            rcFold.Top + ((rcFold.Bottom - rcFold.Top) div 2));
+          Y := rcFold.Top + (rcFold.Bottom - rcFold.Top) div 2;
+          RT.DrawLine(
+            D2D1PointF(X, (cRow - SynEdit.TopLine) * SynEdit.LineHeight),
+            D2D1PointF(X, Y),
+            Brush);
+          RT.DrawLine(
+            D2D1PointF(X, Y),
+            D2D1PointF(rcFold.Right, Y),
+            Brush);
         end;
         // Need to paint a line?
         if SynEdit.AllFoldRanges.FoldAroundLine(vLine, Index) then
         begin
           X := rcFold.Left + ShapeSize div 2;
-          Canvas.MoveTo(X, (cRow - SynEdit.TopLine) * SynEdit.LineHeight);
-          Canvas.LineTo(X, (cRow - SynEdit.TopLine + 1) * SynEdit.LineHeight);
+          RT.DrawLine(
+            D2D1PointF(X, (cRow - SynEdit.TopLine) * SynEdit.LineHeight),
+            D2D1PointF(X, (cRow - SynEdit.TopLine + 1) * SynEdit.LineHeight),
+            Brush);
         end;
       end;
     end;
+    RT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   end;
 end;
 
-procedure TSynGutterBand.PaintLineNumbers(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
+procedure TSynGutterBand.PaintLineNumbers(RT: ID2D1RenderTarget; ClipR: TRect;
+    const FirstRow, LastRow: Integer);
 var
   SynEdit: TCustomSynEdit;
   Row, Line: Integer;
@@ -1999,13 +2011,9 @@ var
   PPI: Integer;
   S: string;
   TextFormat: TSynTextFormat;
-  RT: ISynWicRenderTarget;
   WordWrapGlyph: ID2D1Bitmap;
   RectF: TRectF;
   FontColor: TColor;
-  GDIRT: ID2D1GdiInteropRenderTarget;
-  SourceDC: HDC;
-  BF: TBlendFunction;
 begin
   SynEdit := TCustomSynEdit(Editor);
   Assert(Assigned(Gutter));
@@ -2025,19 +2033,16 @@ begin
   TextFormat.IDW.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
   TextFormat.IDW.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-  RT := SynWicRenderTarget(ClipR.Width, ClipR.Height);
   if SynEdit.WordWrap and SynEdit.WordWrapGlyph.Visible then
-    RT.IDW.CreateBitmapFromWicBitmap(SynEdit.WordWrapGlyph.WicBitmap, nil,
+    RT.CreateBitmapFromWicBitmap(SynEdit.WordWrapGlyph.WicBitmap, nil,
      WordWrapGlyph);
 
-  RT.IDW.BeginDraw;
-  RT.IDW.Clear(D2D1ColorF(0, 0, 0, 0));
   for Row := FirstRow to LastRow do
   begin
     Line := SynEdit.RowToLine(Row);
     LineTop := (Row - SynEdit.TopLine) * SynEdit.LineHeight;
-    LineRect := Rect(MulDiv(MarginX, PPI, 96), LineTop - ClipR.Top,
-      ClipR.Width, LineTop - ClipR.Top + SynEdit.LineHeight);
+    LineRect := Rect(ClipR.Left + MulDiv(MarginX, PPI, 96), LineTop,
+      ClipR.Right, LineTop + SynEdit.LineHeight);
 
     if SynEdit.WordWrap and SynEdit.WordWrapGlyph.Visible and
       (Row <> SynEdit.LineToRow(Line))
@@ -2054,32 +2059,21 @@ begin
         RectF := RectF.FitInto(LineRect);
         RectF.Offset(LineRect.Right - RectF.Right, 0);
       end;
-      RT.IDW.DrawBitmap(WordWrapGlyph, @RectF);
+      RT.DrawBitmap(WordWrapGlyph, @RectF);
     end
     else
     begin
       // paint line numbers
       S := Gutter.FormatLineNumber(Line);
       if Assigned(SynEdit.OnGutterGetText) then
-        SynEdit.OnGutterGetText(Self, Line, S);
-      RT.IDW.DrawText(PChar(S), S.Length, TextFormat.IDW, LineRect,
+        SynEdit.OnGutterGetText(SynEdit, Line, S);
+      RT.DrawText(PChar(S), S.Length, TextFormat.IDW, LineRect,
         TSynDWrite.SolidBrush(FontColor),
-        D2D1_DRAW_TEXT_OPTIONS_CLIP + D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+        D2D1_DRAW_TEXT_OPTIONS_CLIP +
+        IfThen(TOSVersion.Check(6,3), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, 0),
         DWRITE_MEASURING_MODE_GDI_NATURAL);
     end;
   end;
-
-  GDIRT := RT.IDW as ID2D1GdiInteropRenderTarget;
-  CheckOSError(GDIRT.GetDC(D2D1_DC_INITIALIZE_MODE_COPY, SourceDC));
-  BF.BlendOp := AC_SRC_OVER;
-  BF.BlendFlags := 0;
-  BF.SourceConstantAlpha := 255;
-  BF.AlphaFormat := AC_SRC_ALPHA;
-  AlphaBlend(Canvas.Handle, ClipR.Left, ClipR.Top, ClipR.Width, ClipR.Height,
-    SourceDC, 0, 0, ClipR.Width, ClipR.Height, BF);
-  GDIRT.ReleaseDC(nil);
-
-  RT.IDW.EndDraw;
 
   if not Gutter.UseFontStyle then
   begin
@@ -2088,39 +2082,40 @@ begin
   end;
 end;
 
-procedure TSynGutterBand.PaintLines(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
+procedure TSynGutterBand.PaintLines(RT: ID2D1RenderTarget; ClipR: TRect; const
+    FirstRow, LastRow: Integer);
 var
   DoDefault: Boolean;
 begin
   DoDefault := True;
   if Assigned(FOnPaintLines) then
-    FOnPaintLines(Canvas, ClipR, FirstRow, LastRow, DoDefault);
+    FOnPaintLines(RT, ClipR, FirstRow, LastRow, DoDefault);
   if DoDefault then
-    DoPaintLines(Canvas, ClipR, FirstRow, LastRow);
+    DoPaintLines(RT, ClipR, FirstRow, LastRow);
 end;
 
-procedure TSynGutterBand.PaintMargin(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
+procedure TSynGutterBand.PaintMargin(RT: ID2D1RenderTarget; ClipR: TRect; const
+    FirstRow, LastRow: Integer);
 Var
   Offset: Integer;
 begin
   if (Gutter.BorderStyle <> gbsNone) then
-    with Canvas do
-    begin
-      Pen.Color := Gutter.BorderColor;
-      Pen.Width := 1;
+  begin
+    RT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
       if Gutter.BorderStyle = gbsMiddle then
         Offset := Max(2, (ClipR.Right - ClipR.Left) div 2)
       else
         Offset := 1;
-      MoveTo(ClipR.Right - Offset, ClipR.Top);
-      LineTo(ClipR.Right - Offset, ClipR.Bottom);
-    end;
+      RT.DrawLine(
+        Point(ClipR.Right - Offset, ClipR.Top),
+        Point(ClipR.Right - Offset, ClipR.Bottom),
+        TSynDWrite.SolidBrush(Gutter.BorderColor));
+    RT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+  end;
 end;
 
-procedure TSynGutterBand.PaintMarks(Canvas: TCanvas; ClipR: TRect;
-  const FirstRow, LastRow: Integer);
+procedure TSynGutterBand.PaintMarks(RT: ID2D1RenderTarget; ClipR: TRect; const
+    FirstRow, LastRow: Integer);
 var
   SynEdit: TCustomSynEdit;
 
@@ -2136,7 +2131,7 @@ var
           aGutterOff := 0
         else if aGutterOff = 0 then
           aGutterOff := SynEdit.BookMarkOptions.Xoffset;
-        SynEdit.BookMarkOptions.BookmarkImages.Draw(Canvas,
+        ImageListDraw(RT, SynEdit.BookMarkOptions.BookmarkImages,
           ClipR.Left + SynEdit.BookMarkOptions.LeftMargin + aGutterOff,
           (aMarkRow - SynEdit.TopLine) * SynEdit.LineHeight, aMark.ImageIndex);
         Inc(aGutterOff, SynEdit.BookMarkOptions.Xoffset);
@@ -2148,7 +2143,7 @@ var
       begin
         if aGutterOff = 0 then
         begin
-          Gutter.InternalImage.Draw(Canvas, aMark.ImageIndex,
+          Gutter.InternalImage.Draw(RT, aMark.ImageIndex,
             ClipR.Left + SynEdit.BookMarkOptions.LeftMargin + aGutterOff,
             (aMarkRow - SynEdit.TopLine) * SynEdit.LineHeight,
             SynEdit.LineHeight);
@@ -2217,7 +2212,7 @@ begin
   end
 end;
 
-procedure TSynGutterBand.PaintTrackChanges(Canvas: TCanvas; ClipR: TRect;
+procedure TSynGutterBand.PaintTrackChanges(RT: ID2D1RenderTarget; ClipR: TRect;
   const FirstRow, LastRow: Integer);
 var
   SynEdit: TCustomSynEdit;
@@ -2254,8 +2249,7 @@ begin
     begin
       LineRect := Rect(ClipR.Left + MulDiv(MarginX, PPI, 96), LineTop,
         ClipR.Right, LineTop + SynEdit.LineHeight);
-      Canvas.Brush.Color := Color;
-      Canvas.FillRect(LineRect);
+      RT.FillRectangle(LineRect, TSynDWrite.SolidBrush(Color));
     end;
   end;
 end;
@@ -2330,7 +2324,10 @@ begin
   end;
 end;
 
-{ TSynBandsCollection }
+{$ENDREGION}
+
+
+{$REGION 'TSynBandsCollection'}
 
 function TSynBandsCollection.GetBands(Index: Integer): TSynGutterBand;
 begin
@@ -2346,7 +2343,10 @@ begin
     Gutter.Changed;
 end;
 
-{ TTrackChanges }
+{$ENDREGION}
+
+
+{$REGION 'TTrackChanges'}
 
 procedure TSynTrackChanges.Assign(Source: TPersistent);
 var
@@ -2440,7 +2440,10 @@ begin
   end;
 end;
 
-{ TSynIndentGuides }
+{$ENDREGION}
+
+
+{$REGION 'TSynIndentGuides'}
 
 procedure TSynIndentGuides.Assign(Source: TPersistent);
 var
@@ -2486,6 +2489,294 @@ begin
   FVisible := Value;
   if Assigned(FOnChange) then
     FOnChange(Self);
+end;
+
+{$ENDREGION}
+
+
+{$REGION 'TSynIndicators'}
+
+procedure TSynIndicators.Add(Line: Integer; Indicator: TSynIndicator;
+    Invalidate: Boolean = True);
+var
+  Arr: TArray<TSynIndicator>;
+begin
+  if FList.TryGetValue(Line, Arr) then
+    FList[Line] := Arr + [Indicator]
+  else
+    FList.Add(Line, [Indicator]);
+  if Invalidate then
+    InvalidateIndicator(Line, Indicator);
+end;
+
+procedure TSynIndicators.Clear;
+begin
+  FList.Clear;
+end;
+
+procedure TSynIndicators.Clear(Id: TGuid; Invalidate: Boolean = True; Line: Integer = -1);
+
+  procedure ProcessLine(ALine: Integer);
+  var
+    Indicators: TArray<TSynIndicator>;
+    I: Integer;
+  begin
+    if FList.TryGetValue(ALine, Indicators) then
+    begin
+      for I := Length(Indicators) - 1 downto 0 do
+        if Indicators[I].Id = Id then
+        begin
+          if Invalidate then
+            InvalidateIndicator(ALine, Indicators[I]);
+          Delete(Indicators, I, 1);
+        end;
+      if Length(Indicators) = 0 then
+        FList.Remove(ALine)
+      else
+        FList[ALine] := Indicators;
+    end;
+  end;
+
+var
+  ALine: Integer;
+begin
+  if Line < 0  then
+    for ALine in FList.Keys.ToArray do
+      ProcessLine(ALine)
+  else
+    ProcessLine(Line);
+end;
+
+procedure TSynIndicators.Clear(Line: Integer; const Indicator: TSynIndicator);
+var
+  Indicators: TArray<TSynIndicator>;
+  I: Integer;
+begin
+  if FList.TryGetValue(Line, Indicators) then
+  begin
+    for I := 0 to Length(Indicators) - 1 do
+      if Indicators[I] = Indicator then
+      begin
+        InvalidateIndicator(Line, Indicator);
+        Delete(Indicators, I, 1);
+        if Length(Indicators) = 0 then
+          FList.Remove(Line)
+        else
+          FList[Line] := Indicators;
+        Break;
+      end;
+  end;
+end;
+
+constructor TSynIndicators.Create(Owner: TCustomControl);
+begin
+  inherited Create;
+  FOwner := Owner;
+  FList := TDictionary<Integer, TArray<TSynIndicator>>.Create;
+end;
+
+destructor TSynIndicators.Destroy;
+begin
+  FRegister.Free;
+  FList.Free;
+  inherited;
+end;
+
+function TSynIndicators.GetSpec(Id: TGUID): TSynIndicatorSpec;
+begin
+  Result := FRegister[Id];
+end;
+
+function TSynIndicators.IndicatorAtMousePos(MousePos: TPoint;
+  var Indicator: TSynIndicator): Boolean;
+var
+  DC: TDisplayCoord;
+  BC: TBufferCoord;
+  Editor: TCustomSynEdit;
+begin
+  Editor := FOwner as TCustomSynEdit;
+  DC := Editor.PixelsToRowColumn(MousePos.X, MousePos.Y);
+  BC := Editor.DisplayToBufferPos(DC);
+  Result := IndicatorAtPos(BC, Indicator);
+end;
+
+function TSynIndicators.IndicatorAtPos(Pos: TBufferCoord; var Indicator:
+    TSynIndicator): Boolean;
+var
+  LineIndicators:  TArray<TSynIndicator>;
+  LIndicator: TSynIndicator;
+begin
+  Result := False;
+  if FList.TryGetValue(Pos.Line, LineIndicators) then
+  begin
+    for LIndicator in LineIndicators do
+      if InRange(Pos.Char, LIndicator.CharStart, LIndicator.CharEnd - 1) then
+      begin
+        Indicator := LIndicator;
+        Exit(True);
+      end;
+  end;
+end;
+
+procedure TSynIndicators.InvalidateIndicator(Line: Integer;  Indicator: TSynIndicator);
+begin
+  TCustomSynEdit(FOwner).InvalidateRange(BufferCoord(Indicator.CharStart, Line),
+    BufferCoord(Indicator.CharEnd, Line));
+end;
+
+function TSynIndicators.LineIndicators(Line: Integer): TArray<TSynIndicator>;
+begin
+  // Sets Result to [] if not found
+  FList.TryGetValue(Line, Result);
+end;
+
+procedure TSynIndicators.LinePut(aIndex: Integer);
+{  aIndex 0-based Indicator lines 1-based}
+begin
+  FList.Remove(aIndex + 1);
+end;
+
+procedure TSynIndicators.LinesDeleted(FirstLine, Count: Integer);
+{ Adjust Indicator lines for deletion -
+  FirstLine 0-based Indicator lines 1-based}
+var
+  Keys: TArray<Integer>;
+  Line: Integer;
+begin
+  Keys := FList.Keys.ToArray;
+  TArray.Sort<Integer>(Keys);
+  for Line in Keys do
+  begin
+    if InRange(Line, FirstLine + 1, FirstLine + Count) then
+      FList.Remove(Line)
+    else if Line > FirstLine + Count then
+    begin
+      FList.Add(Line - Count, FList[Line]);
+      FList.Remove(Line);
+    end;
+  end;
+end;
+
+procedure TSynIndicators.LinesInserted(FirstLine, Count: Integer);
+{ Adjust Indicator lines for insertion -
+  FirstLine 0-based Indicator lines 1-based}
+var
+  Keys: TArray<Integer>;
+  I, Line: Integer;
+begin
+  Keys := FList.Keys.ToArray;
+  TArray.Sort<Integer>(Keys);
+  for I := Length(Keys) - 1 downto 0 do
+  begin
+    Line := Keys[I];
+    if Line > FirstLine then
+    begin
+      FList.Add(Line + Count, FList[Line]);
+      FList.Remove(Line);
+    end;
+  end;
+end;
+
+class procedure TSynIndicators.Paint(RT: ID2D1RenderTarget;
+  Spec: TSynIndicatorSpec; const ClipR: TRect; StartOffset: Integer);
+var
+  Geometry: ID2D1PathGeometry;
+  Sink: ID2D1GeometrySink;
+  Delta: Integer;
+  P: TPoint;
+  R: TRect;
+begin
+  R := ClipR;
+  Dec(R.Left, StartOffset);
+  RT.PushAxisAlignedClip(ClipR, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+  case Spec.Style of
+    sisTextDecoration:
+      // Otherwise it is already hanlded
+      if not SameValue(Spec.Background.a, 0) and
+        not SameValue(Spec.Background.a, 1)
+      then
+        RT.FillRectangle(R, TSynDWrite.SolidBrush(Spec.Background));
+    sisSquiggleMicrosoftWord,
+    sisSquiggleWordPerfect:
+      begin
+        Dec(R.Right);
+        CheckOSError(TSynDWrite.D2DFactory.CreatePathGeometry(Geometry));
+        CheckOSError(Geometry.Open(Sink));
+        Delta := Round(R.Height / 6);
+        if Spec.Style = sisSquiggleMicrosoftWord then
+        begin
+          P := Point(R.Left, R.Bottom - Delta);
+          Sink.BeginFigure(P, D2D1_FIGURE_BEGIN_HOLLOW);
+          while P.X < R.Right do
+          begin
+            Inc(P.X, Abs(Delta));
+            Inc(P.Y, Delta);
+            Delta := -Delta;
+            Sink.AddLine(P);
+          end;
+          Sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        end
+        else
+        begin
+          P := Point(R.Left, R.Bottom);
+          while P.X < R.Right do
+          begin
+            Sink.BeginFigure(P, D2D1_FIGURE_BEGIN_HOLLOW);
+            P.Offset(Delta, -Delta);
+            Sink.AddLine(P);
+            Sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            P.Offset(Delta - 1, Delta)
+          end;
+        end;
+        CheckOSError(Sink.Close);
+
+        RT.DrawGeometry(Geometry, TSynDWrite.SolidBrush(Spec.Foreground));
+      end;
+    sisRectangle,
+    sisFilledRectangle:
+      begin
+        Dec(R.Right); Dec(R.Bottom);
+        if Spec.Style = sisFilledRectangle then
+          RT.FillRectangle(R, TSynDWrite.SolidBrush(Spec.Background));
+        if TAlphaColorF(Spec.Foreground) <> TAlphaColorF(clNoneF) then
+          RT.DrawRectangle(R, TSynDWrite.SolidBrush(Spec.Foreground));
+      end;
+    sisRoundedRectangle,
+    sisRoundedFilledRectangle:
+      begin
+        Dec(R.Right); Dec(R.Bottom);
+        if Spec.Style = sisRoundedFilledRectangle then
+         RT.FillRoundedRectangle(D2D1RoundedRect(R, R.Height div 4, R.Height div 4),
+            TSynDWrite.SolidBrush(Spec.Background));
+        RT.DrawRoundedRectangle(D2D1RoundedRect(R, R.Height div 4, R.Height div 4),
+           TSynDWrite.SolidBrush(Spec.Foreground));
+      end;
+  end;
+  RT.PopAxisAlignedClip;
+end;
+
+procedure TSynIndicators.RegisterSpec(Id: TGuid; Spec: TSynIndicatorSpec);
+begin
+  if FRegister = nil then
+    FRegister := TDictionary<TGUID, TSynIndicatorSpec>.Create;
+  FRegister.AddOrSetValue(Id, Spec);
+end;
+{$ENDREGION}
+
+
+{ TSynIndicator }
+
+constructor TSynIndicator.Create(aId: TGuid; aCharStart, aCharEnd: Integer);
+begin
+  Self.Id := aId;
+  Self.CharStart := aCharStart;
+  Self.CharEnd := aCharEnd;
+end;
+
+class operator TSynIndicator.Equal(const A, B: TSynIndicator): Boolean;
+begin
+  Result := (A.Id = B.Id) and (A.CharStart = B.CharStart)
+    and (A.CharEnd = B.CharEnd);
 end;
 
 end.

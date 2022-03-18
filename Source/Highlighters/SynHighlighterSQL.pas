@@ -1,4 +1,4 @@
-{-------------------------------------------------------------------------------
+﻿{-------------------------------------------------------------------------------
 The contents of this file are subject to the Mozilla Public License
 Version 1.1 (the "License"); you may not use this file except in compliance
 with the License. You may obtain a copy of the License at
@@ -42,7 +42,7 @@ Known Issues:
 @abstract(SQL highlighter for SynEdit with support for different dialects.)
 @author(Michael Hieke)
 @created(2000-04-21)
-@lastmod(2000-11-16)
+@lastmod(2022-02-11)
 The SynHighlighterSQL implements a highlighter for SQL for the SynEdit projects.
 Different SQL dialects can be selected via the Dialect property.
 }
@@ -54,15 +54,13 @@ unit SynHighlighterSQL;
 interface
 
 uses
-  Graphics,
-  Registry,
+  System.SysUtils,
+  System.Classes,
+  System.Generics.Defaults,
+  System.Generics.Collections,
+  Vcl.Graphics,
   SynEditTypes,
-  SynEditHighlighter,
-  SynHighlighterHashEntries,
-  SynUnicode,
-  Generics.Collections,
-  SysUtils,
-  Classes;
+  SynEditHighlighter;
 
 type
   TtkTokenKind = (tkComment, tkDatatype, tkDefaultPackage, tkException,
@@ -80,10 +78,9 @@ type
   private
     fRange: TRangeState;
     fTokenID: TtkTokenKind;
-    fKeywords: TSynHashEntryList;
+    FKeywords: TDictionary<String, TtkTokenKind>;
     FProcNames: TStrings;
     fTableNames: TStrings;
-    FTableDict: TDictionary<string, Boolean>;
     fFunctionNames: TStrings;
     fDialect: TSQLDialect;
     fCommentAttri: TSynHighlighterAttributes;
@@ -105,7 +102,7 @@ type
     fTableNameAttri: TSynHighlighterAttributes;
     fProcNameAttri: TSynHighlighterAttributes;
     fVariableAttri: TSynHighlighterAttributes;
-    function HashKey(Str: PWideChar): Integer;
+    function IsStrictIdentChar(AChar: WideChar): Boolean;
     function IdentKind(MayBe: PWideChar): TtkTokenKind;
     procedure DoAddKeyword(AKeyword: string; AKind: integer);
     procedure SetDialect(Value: TSQLDialect);
@@ -214,6 +211,8 @@ type
 implementation
 
 uses
+  System.Character,
+  SynEditMiscProcs,
   SynEditStrConst;
 
 const
@@ -1351,66 +1350,44 @@ const
     'RPAD,SIN,SITENAME,SQRT,STDEV,SUBSTR,SUBSTRING,SUM,TAN,THEN,TO_CHAR,TO_DATE,' +
     'TODAY,TRIM,TRUNC,UNITS,UPPER,USER,VARIANCE,WEEKDAY,WHEN,YEAR';
 
-function TSynSQLSyn.HashKey(Str: PWideChar): Integer;
-var
-  FoundDoubleMinus: Boolean;
-
-  function GetOrd: Integer;
-  begin
-    case Str^ of
-      '_': Result := 1;
-      'a'..'z': Result := 2 + Ord(Str^) - Ord('a');
-      'A'..'Z': Result := 2 + Ord(Str^) - Ord('A');
-      '@':
-        if fDialect in [sqlMSSQL7, sqlMSSQL2K] then
-          Result := 24
-        else
-          Result := 0;
-      else Result := 0;
-    end;
-  end;
-
+function TSynSQLSyn.IsStrictIdentChar(AChar: WideChar): Boolean;
 begin
-  Result := 0;
-  while IsIdentChar(Str^) do
-  begin
-    FoundDoubleMinus := (Str^ = '-') and ((Str + 1)^ = '-');
-    if FoundDoubleMinus then Break;
-{$IFOPT Q-}
-    Result := 2 * Result + GetOrd;
-{$ELSE}
-    Result := (2 * Result + GetOrd) and $FFFFFF;
-{$ENDIF}
-    inc(Str);
+  // This routine follows the strict identifier rules of our supported databases.
+  // This may have to be revisited if dialects allow non-ascii chars in unquoted
+  // identifiers
+  case AChar of
+    'a'..'z', 'A'..'Z', '0'..'9', '_':
+      Result := True;
+    '-':
+      Result := fDialect = sqlStandard;
+    '#', '$':                          // TODO: check this case, ANSI code wasn't clear here if this is exclusively Oracle
+      Result := fDialect in [sqlOracle, sqlNexus];
+    '@':
+      Result := fDialect in [sqlMSSQL7, sqlMSSQL2K];
+     '!', '^', '{', '}','~':
+      Result := fDialect = sqlNexus
+    else
+      Result := False;
   end;
-  Result := Result and $FF; // 255
-  if Assigned(fToIdent) then
-    fStringLen := Str - fToIdent
-  else
-    fStringLen := 0;
 end;
 
 function TSynSQLSyn.IdentKind(MayBe: PWideChar): TtkTokenKind;
 var
-  Entry: TSynHashEntry;
+  S: string;
 begin
   fToIdent := MayBe;
-  Entry := fKeywords[HashKey(MayBe)];
-  while Assigned(Entry) do
+  while IsStrictIdentChar(MayBe^) do
   begin
-    if Entry.KeywordLen > fStringLen then
-      break
-    else if Entry.KeywordLen = fStringLen then
-      if IsCurrentToken(Entry.Keyword) then
-      begin
-        Result := TtkTokenKind(Entry.Kind);
-        exit;
-      end;
-    Entry := Entry.Next;
+    // Special case for sqlStandard which allows hyphen as an identifier.
+    if (MayBe^ = '-') and ((MayBe + 1)^ = '-') then
+      Break;
+    Inc(Maybe);
   end;
-  if fTableDict.ContainsKey(SysUtils.AnsiLowerCase(Copy(StrPas(fToIdent), 1, fStringLen))) then
-    Result := tkTableName
-  else
+  fStringLen := Maybe - fToIdent;
+  if FScanningToEOL then
+    Exit(tkIdentifier);
+  SetString(S, fToIdent, fStringLen);
+  if not FKeywords.TryGetValue(S, Result) then
     Result := tkIdentifier;
 end;
 
@@ -1420,14 +1397,13 @@ begin
 
   fCaseSensitive := False;
 
-  fKeywords := TSynHashEntryList.Create;
+  FKeywords := TDictionary<string, TtkTokenKind>.Create;
 
   FProcNames := TStringList.Create;
   TStringList(FProcNames).OnChange := ProcNamesChanged;
 
   fTableNames := TStringList.Create;
   TStringList(fTableNames).OnChange := TableNamesChanged;
-  FTableDict := TDictionary<string, Boolean>.Create;
 
   fFunctionNames := TStringList.Create;
   TStringList(fFunctionNames).OnChange := FunctionNamesChanged;
@@ -1490,10 +1466,9 @@ end;
 
 destructor TSynSQLSyn.Destroy;
 begin
-  fKeywords.Free;
+  FKeywords.Free;
   fProcNames.Free;
   fTableNames.Free;
-  fTableDict.Free;
   fFunctionNames.Free;
   inherited Destroy;
 end;
@@ -1599,7 +1574,7 @@ begin
       Inc(Run);
   end
   else
-    while IsIdentChar(fLine[Run]) do
+    while IsStrictIdentChar(fLine[Run]) do
     begin
       FoundDoubleMinus := (fLine[Run] = '-') and (fLine[Run + 1] = '-');
       if FoundDoubleMinus then Break;
@@ -1863,7 +1838,7 @@ begin
       FoundDoubleMinus := (fLine[i] = '-') and (fLine[i + 1] = '-');
       if FoundDoubleMinus then Break;
       Inc(i);
-    until not IsIdentChar(fLine[i]);
+    until not IsStrictIdentChar(fLine[i]);
     Run := i;
   end;
 end;
@@ -1902,10 +1877,16 @@ end;
 function TSynSQLSyn.IsKeyword(const AKeyword: string): Boolean;
 var
   tk: TtkTokenKind;
+  S: string;
 begin
-  tk := IdentKind(PWideChar(AKeyword));
-  Result := tk in [tkDatatype, tkException, tkFunction, tkKey, tkPLSQL,
-    tkDefaultPackage];
+  if not fCaseSensitive then
+    S := AnsiLowerCase(AKeyword)
+  else
+    S := AKeyword;
+  if not FKeywords.TryGetValue(S, tk) then
+    tk := tkUnknown;
+  Result := tk in
+    [tkDatatype, tkException, tkFunction, tkKey, tkPLSQL, tkDefaultPackage];
 end;
 
 procedure TSynSQLSyn.Next;
@@ -2032,8 +2013,6 @@ end;
 function TSynSQLSyn.IsIdentChar(AChar: WideChar): Boolean;
 begin
   case AChar of
-    'a'..'z', 'A'..'Z', '0'..'9', '_':
-      Result := True;
     '-':
       Result := fDialect = sqlStandard;
     '#', '$':                          // TODO: check this case, ANSI code wasn't clear here if this is exclusively Oracle
@@ -2043,7 +2022,9 @@ begin
      '!', '^', '{', '}','~':
       Result := fDialect = sqlNexus
     else
-      Result := False;
+      Result := (AChar = '_') or AChar.IsLetterOrDigit or
+        CharInSet(AChar, AdditionalIdentChars) and
+        not IsWordBreakChar(AChar);
   end;
 end;
 
@@ -2054,11 +2035,11 @@ end;
 
 procedure TSynSQLSyn.DoAddKeyword(AKeyword: string; AKind: integer);
 var
-  HashValue: Integer;
+  S: string;
 begin
-  AKeyword := SysUtils.AnsiLowerCase(AKeyword);
-  HashValue := HashKey(PWideChar(AKeyword));
-  fKeywords[HashValue] := TSynHashEntry.Create(AKeyword, AKind);
+  S := AnsiLowerCase(AKeyword);
+  if not FKeywords.ContainsKey(S) then
+    FKeywords.Add(S, TtkTokenKind(AKind));
 end;
 
 procedure TSynSQLSyn.SetTableNames(const Value: TStrings);
@@ -2074,58 +2055,39 @@ end;
 procedure TSynSQLSyn.PutTableNamesInKeywordList;
 var
   i: Integer;
-  Entry: TSynHashEntry;
+  S: string;
 begin
   for i := 0 to fTableNames.Count - 1 do
   begin
-    Entry := fKeywords[HashKey(PWideChar(fTableNames[i]))];
-    while Assigned(Entry) do
-    begin
-      if SysUtils.AnsiLowerCase(Entry.Keyword) = SysUtils.AnsiLowerCase(fTableNames[i]) then
-        Break;
-      Entry := Entry.Next;
-    end;
-    if not Assigned(Entry) then
-      if not fTableDict.ContainsKey(SysUtils.AnsiLowerCase(fTableNames[i])) then
-        FTableDict.Add(SysUtils.AnsiLowerCase(FTableNames[i]), True);
+    S := AnsiLowerCase(fTableNames[i]);
+    if not FKeywords.ContainsKey(S) then
+      FKeywords.Add(S, tkTableName);
   end;
 end;
 
 procedure TSynSQLSyn.PutFunctionNamesInKeywordList;
 var
   i: Integer;
-  Entry: TSynHashEntry;
+  S: string;
 begin
   for i := 0 to (fFunctionNames.Count - 1) do
   begin
-    Entry := fKeywords[HashKey(PWideChar(fFunctionNames[i]))];
-    while Assigned(Entry) do
-    begin
-      if SysUtils.AnsiLowerCase(Entry.Keyword) = SysUtils.AnsiLowerCase(fFunctionNames[i]) then
-        Break;
-      Entry := Entry.Next;
-    end;
-    if not Assigned(Entry) then
-      DoAddKeyword(fFunctionNames[i], Ord(tkFunction));
+    S := AnsiLowerCase(fFunctionNames[i]);
+    if not FKeywords.ContainsKey(S) then
+      FKeywords.Add(S, tkFunction);
   end;
 end;
 
 procedure TSynSQLSyn.PutProcNamesInKeywordList;
 var
   i: Integer;
-  Entry: TSynHashEntry;
+  S: string;
 begin
-  for i := 0 to fProcNames.Count - 1 do
+  for i := 0 to (fProcNames.Count - 1) do
   begin
-    Entry := fKeywords[HashKey(PWideChar(FProcNames[i]))];
-    while Assigned(Entry) do
-    begin
-      if SysUtils.AnsiLowerCase(Entry.Keyword) = SysUtils.AnsiLowerCase(FProcNames[i]) then
-        Break;
-      Entry := Entry.Next;
-    end;
-    if not Assigned(Entry) then
-      DoAddKeyword(fProcNames[i], Ord(tkProcName));
+    S := AnsiLowerCase(fProcNames[i]);
+    if not FKeywords.ContainsKey(S) then
+      FKeywords.Add(S, tkProcName);
   end;
 end;
 
@@ -2133,12 +2095,11 @@ procedure TSynSQLSyn.InitializeKeywordLists;
 var
   I: Integer;
 begin
-  fKeywords.Clear;
-  fTableDict.Clear;
+  FKeywords.Clear;
   fToIdent := nil;
 
   for I := 0 to Ord(High(TtkTokenKind)) do
-    EnumerateKeywords(I, GetKeywords(I), IsIdentChar, DoAddKeyword);
+    EnumerateKeywords(I, GetKeywords(I), IsStrictIdentChar, DoAddKeyword);
 
   PutProcNamesInKeywordList;
   PutTableNamesInKeywordList;

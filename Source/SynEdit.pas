@@ -27,7 +27,6 @@ replace them with the notice and other provisions required by the GPL.
 If you do not delete the provisions above, a recipient may use your version
 of this file under either the MPL or the GPL.
 -------------------------------------------------------------------------------}
-//todo: in WordWrap mode, parse lines only once in PaintLines()
 //todo: Remove checks for WordWrap. Must abstract the behaviour with the plugins instead.
 //todo: Move WordWrap glyph to the WordWrap plugin.
 
@@ -107,6 +106,10 @@ type
   TGutterGetTextEvent = procedure(Sender: TObject; aLine: Integer;
     var aText: string) of object;
 
+  TGetLineIndicatorsEvent = procedure(Sender: TObject; const Line: Integer;
+    var LineIndicators: TArray<TSynIndicator>) of Object;
+
+
   TSynEditCaretType = (ctVerticalLine, ctHorizontalLine, ctHalfBlock, ctBlock);
 
   TSynStateFlag = (sfCaretChanged, sfScrollbarChanged, sfLinesChanging,
@@ -152,9 +155,10 @@ type
   TSynEditorOptions = set of TSynEditorOption;
 
 const
-  SYNEDIT_DEFAULT_OPTIONS = [eoAutoIndent, eoDragDropEditing, eoEnhanceEndKey,
-    eoScrollPastEol, eoShowScrollHint, eoTabIndent, eoTabsToSpaces,
-    eoSmartTabDelete, eoGroupUndo, eoShowLigatures];
+  SYNEDIT_DEFAULT_OPTIONS = [eoAutoIndent, eoDragDropEditing, eoKeepCaretX,
+    eoEnhanceHomeKey, eoEnhanceEndKey, eoHideShowScrollbars,
+    eoDisableScrollArrows, eoShowScrollHint, eoTabIndent, eoTabsToSpaces,
+    eoSmartTabDelete, eoGroupUndo, eoDropFiles, eoShowLigatures];
 
 type
   TCreateParamsW = record
@@ -280,6 +284,7 @@ type
 
   TCustomSynEdit = class(TCustomControl)
   private
+    procedure CMHintShow(var Message: TCMHintShow); message CM_HINTSHOW;
     procedure WMCancelMode(var Message: TMessage); message WM_CANCELMODE;
     procedure WMCaptureChanged(var Msg: TMessage); message WM_CAPTURECHANGED;
     procedure WMClear(var Msg: TMessage); message WM_CLEAR;
@@ -379,8 +384,8 @@ type
     fScrollDeltaX, fScrollDeltaY: Integer;
     fClickCountTimer: TStopWatch;
     fClickCount: Integer;
+    FIndicators: TSynIndicators;
     FPaintTransientLock: Integer;
-    FIsScrolling: Boolean;
     FAdditionalWordBreakChars: TSysCharSet;
     FAdditionalIdentChars: TSysCharSet;
     FTextFormat: TSynTextFormat;
@@ -403,7 +408,9 @@ type
     fOnContextHelp: TContextHelpEvent;
     fOnPaintTransient: TPaintTransient;
     fOnScroll: TScrollEvent;
+    fOnShowHint: TShowHintEvent;
     fOnGutterGetText: TGutterGetTextEvent;
+    FOnGetLineIndicators: TGetLineIndicatorsEvent;
     fOnStatusChange: TStatusChangeEvent;
     fOnTripleClick: TNotifyEvent;
     fOnQudrupleClick: TNotifyEvent;
@@ -436,7 +443,7 @@ type
     procedure DoLinesBeforeDeleted(FirstLine, Count: Integer);
     procedure DoLinesDeleted(FirstLine, Count: Integer);
     procedure DoLinesInserted(FirstLine, Count: Integer);
-    procedure DoLinePut(FirstLine: Integer; const OldLine: string);
+    procedure DoLinePut(Index: Integer; const OldLine: string);
     procedure DoShiftTabKey;
     procedure DoTabKey;
     function FindHookedCmdEvent(AHandlerProc: THookedCommandEvent): integer;
@@ -451,7 +458,7 @@ type
     function GetDisplayX: Integer;
     function GetDisplayY: Integer;
     function GetDisplayXY: TDisplayCoord;
-    function GetDisplayLineCount: Integer;
+    function GetDisplayRowCount: Integer;
     function GetHookedCommandHandlersCount: Integer;
     function GetLineText: string;
     function GetMaxUndo: Integer;
@@ -547,6 +554,7 @@ type
     procedure OnCodeFoldingChange(Sender: TObject);
     function GetCollapseMarkRect(Row: Integer; Line: Integer = -1): TRect;
     function GetWrapAreaWidth: Integer;
+    function GetIsScrolling: Boolean;
 //-- CodeFolding
   protected
     FIgnoreNextChar: Boolean;
@@ -606,10 +614,10 @@ type
     procedure NotifyHookedCommandHandlers(AfterProcessing: Boolean;
       var Command: TSynEditorCommand; var AChar: WideChar; Data: pointer); virtual;
     procedure Paint; override;
-    procedure PaintGutter(const AClip: TRect; const aFirstRow,
-      aLastRow: Integer); virtual;
-    procedure PaintTextLines(AClip: TRect; const aFirstRow, aLastRow:
-        Integer); virtual;
+    procedure PaintGutter(RT: ID2D1RenderTarget; const AClip: TRect; const
+        aFirstRow, aLastRow: Integer); virtual;
+    procedure PaintTextLines(RT: ID2D1RenderTarget; AClip: TRect; const aFirstRow,
+        aLastRow: Integer); virtual;
     procedure InternalSetCaretXY(const Value: TBufferCoord); virtual;
     procedure SetCaretXY(const Value: TBufferCoord); virtual;
     procedure SetCaretXYEx(EnsureVisible: Boolean; Value: TBufferCoord); virtual;
@@ -724,6 +732,7 @@ type
     procedure InvalidateGutterBand(Kind: TSynGutterBandKind);
     procedure InvalidateLine(Line: integer);
     procedure InvalidateLines(FirstLine, LastLine: integer);
+    procedure InvalidateRange(const BB, BE: TBufferCoord);
     procedure InvalidateSelection;
     function IsBookmark(BookMark: Integer): Boolean;
     function IsPointInSelection(const Value: TBufferCoord): Boolean;
@@ -733,7 +742,12 @@ type
     function LineToRow(aLine: Integer): Integer;
     function RowToLine(aRow: Integer): Integer;
     procedure PasteFromClipboard;
-    function TextWidth(const S: string): Integer;
+    function TextWidth(const S: string): Integer; overload;
+    function TextWidth(P: PChar; Len: Integer): Integer; overload;
+
+    // for use in PaintTransient
+    procedure PaintText(S: string; P: TPoint; ClipR: TRect; FontStyle: TFontStyles;
+        FontColor: TColor; BkgColor: TColor = clNone);
 
     function NextWordPos: TBufferCoord; virtual;
     function NextWordPosEx(const XY: TBufferCoord): TBufferCoord; virtual;
@@ -744,13 +758,15 @@ type
     function PrevWordPos: TBufferCoord; virtual;
     function PrevWordPosEx(const XY: TBufferCoord): TBufferCoord; virtual;
 
-    function PixelsToColumn(S: string; aX: Integer): Integer;
+    function PixelsToColumn(P: PChar; Len: Integer; aX: Integer; CharBefore:
+        Boolean = False): Integer;
     function PixelsToRowColumn(aX, aY: Integer): TDisplayCoord;
     function PixelsToNearestRowColumn(aX, aY: Integer): TDisplayCoord;
     procedure Redo;
     procedure RegisterCommandHandler(const AHandlerProc: THookedCommandEvent;
       AHandlerData: pointer);
     function RowColumnInView(RowCol: TDisplayCoord): Boolean;
+    function ColumnToPixels(const S: string; Col: Integer): Integer;
     function RowColumnToPixels(const RowCol: TDisplayCoord): TPoint;
     function RowColToCharIndex(RowCol: TBufferCoord): Integer;
     function SearchReplace(const ASearch, AReplace: string;
@@ -824,13 +840,14 @@ type
     property DisplayX: Integer read GetDisplayX;
     property DisplayY: Integer read GetDisplayY;
     property DisplayXY: TDisplayCoord read GetDisplayXY write SetDisplayXY;
-    property DisplayLineCount: Integer read GetDisplayLineCount;
+    property DisplayRowCount: Integer read GetDisplayRowCount;
     property CharWidth: Integer read fCharWidth;
     property Color;
     property Cursor default crIBeam;
     property Font;
-    property Highlighter: TSynCustomHighlighter
-      read fHighlighter write SetHighlighter;
+    property Indicators: TSynIndicators read FIndicators;
+    property Highlighter: TSynCustomHighlighter read fHighlighter
+      write SetHighlighter;
     property LeftChar: Integer read fLeftChar write SetLeftChar;
     property LineHeight: Integer read fTextHeight;
     property LinesInWindow: Integer read fLinesInWindow;
@@ -881,7 +898,7 @@ type
       write SetInsertCaret default ctVerticalLine;
     property InsertMode: boolean read fInserting write SetInsertMode
       default true;
-    property IsScrolling : Boolean read FIsScrolling;
+    property IsScrolling : Boolean read GetIsScrolling;
     property Keystrokes: TSynEditKeyStrokes
       read FKeystrokes write SetKeystrokes stored False;
     property MaxUndo: Integer read GetMaxUndo write SetMaxUndo default 0;
@@ -921,6 +938,8 @@ type
       read fOnGutterClick write fOnGutterClick;
     property OnGutterGetText: TGutterGetTextEvent read fOnGutterGetText
       write fOnGutterGetText;
+    property OnGetLineIndicators: TGetLineIndicatorsEvent
+      read FOnGetLineIndicators write FOnGetLineIndicators;
     property OnMouseCursor: TMouseCursorEvent read fOnMouseCursor
       write fOnMouseCursor;
     property OnPaint: TPaintEvent read fOnPaint write fOnPaint;
@@ -936,6 +955,7 @@ type
       read fOnStatusChange write fOnStatusChange;
     property OnPaintTransient: TPaintTransient
       read fOnPaintTransient write fOnPaintTransient;
+    property OnShowHint: TShowHintEvent read fOnShowHint write fOnShowHint;
     property OnScroll: TScrollEvent read fOnScroll write fOnScroll;
     property OnTripleClick: TNotifyEvent
       read fOnTripleClick write fOnTripleClick;
@@ -1046,6 +1066,7 @@ type
     property OnProcessCommand;
     property OnProcessUserCommand;
     property OnReplaceText;
+    property OnShowHint;
     property OnScroll;
     property OnSpecialLineColors;
     property OnStatusChange;
@@ -1109,22 +1130,76 @@ begin
   Result := PixelsToRowColumn(aX, aY);
 end;
 
-function TCustomSynEdit.PixelsToColumn(S: string; aX: Integer): Integer;
+function TCustomSynEdit.PixelsToColumn(P: PChar; Len: Integer; aX: Integer;
+  CharBefore: Boolean = False): Integer;
+{ Returns the character index at given pixel position aX when the text is
+  rendered with the SynEdit TextFormat.
+  If CharBefore is true you always get the character at or before the pixel
+  position, othwerwise you get the nearest character}
 var
   Layout: TSynTextLayout;
   HTM: TDwriteHitTestMetrics;
   IsTrailing, IsInside: LongBool;
+  P2, PStart, PEnd: PChar;
+  W : Integer;
 begin
-  if S = '' then
+  if (Len = 0) or (aX <= 0) then
     Result := Max((ax div fCharWidth) + 1, 1)
   else
   begin
-    Layout.Create(FTextFormat, PChar(S), S.Length, MaxInt, fTextHeight);
-    CheckOSError(Layout.IDW.HitTestPoint(aX,
-      fTextHeight div 2, IsTrailing, IsInside, HTM));
-    Result := Integer(HTM.textPosition) + IfThen(IsTrailing, HTM.length + 1, 1);
-    if (Result = S.Length + 1) and (ax > HTM.left + HTM.width) then
-      Inc(Result, Round((ax - HTM.left - HTM.width) / fCharWidth));
+    PStart := P;
+    PEnd := P + Len;
+    W := 0;
+
+    while (P < PEnd) and (W < aX) do
+    begin
+      while (P < PEnd) and (W < aX) do
+      begin
+        case P^ of
+           #9: Inc(W, fTabWidth * fCharWidth - W mod (fTabWidth * fCharWidth));
+           #32..#126: Inc(W, FCharWidth);
+         else
+           break;
+         end;
+         Inc(P);
+      end;
+      if not CharBefore and ((P = PEnd) or (W >= aX)) and (W <= aX + fCharWidth div 2) then
+        Inc(P);
+
+      if (P >= PEnd) or (W >= aX) then Break;
+
+      // Just in case P is followed by combining characters
+      if (P > PStart) and not (Word((P-1)^) in [9, 32]) then
+      begin
+        Dec(P);
+        Dec(W, FCharWidth);
+      end;
+
+      // Measure non-ascii text code points
+      P2 := P;
+      while P2 < PEnd do
+      begin
+        Inc(P2);
+        if Word(P2^) in [9, 32..126] then Break;
+      end;
+
+      Layout.Create(FTextFormat, P, P2-P, MaxInt, fTextHeight);
+      CheckOSError(Layout.IDW.HitTestPoint(aX - W,
+        fTextHeight div 2, IsTrailing, IsInside, HTM));
+
+      Inc(W, Round(HTM.left + HTM.width));
+      if IsInside then
+      begin
+        Inc(P, Integer(HTM.textPosition) +
+          IfThen(not CharBefore and IsTrailing, HTM.length + 1, 1));
+        Break;
+      end
+      else
+        P := P2;
+    end;
+    Result := P - PStart;
+    if (P >= PEnd) and (ax > W) then
+      Inc(Result, Round((ax - W) / fCharWidth))
   end;
 end;
 
@@ -1132,35 +1207,82 @@ function TCustomSynEdit.PixelsToRowColumn(aX, aY: Integer): TDisplayCoord;
 var
   S: string;
 begin
-  Result.Row := Max(1, TopLine + (aY div fTextHeight));
+  Result.Row := MinMax(TopLine + (aY div fTextHeight), 1, DisplayRowCount);
   S := Rows[Result.Row];
-  Result.Column := PixelsToColumn(S, ax - fTextOffset);
+  Result.Column := PixelsToColumn(PChar(S), S.Length, ax - fTextOffset);
+end;
+
+function TCustomSynEdit.ColumnToPixels(const S: string; Col: Integer): Integer;
+var
+  Layout: TSynTextLayout;
+  HTM: TDwriteHitTestMetrics;
+  P, P2, PStart, PEnd, PCol: PChar;
+  X, Y: Single;
+begin
+  P := PChar(S);
+  PStart := P;
+  PEnd := P + S.Length;
+  PCol := P + Col - 1;
+  Result := 0;
+
+  while P < PCol do
+  begin
+    while P < PCol do
+    begin
+      case P^ of
+         #9: Inc(Result, fTabWidth * fCharWidth - Result mod (fTabWidth * fCharWidth));
+         #32..#126: Inc(Result, FCharWidth);
+       else
+         break;
+       end;
+       Inc(P);
+    end;
+
+    if P >= PCol then Break;
+
+    // Just in case P is followed by combining characters
+    if (P > PStart) and not (Word((P-1)^) in [9, 32]) then
+    begin
+      Dec(P);
+      Dec(Result, FCharWidth);
+    end;
+    // Measure non-ascii text code points
+    P2 := P;
+    while P2 < PEnd do
+    begin
+      Inc(P2);
+      if Word(P2^) in [9, 32..126] then Break;
+    end;
+    Layout.Create(FTextFormat, P, P2-P, MaxInt, fTextHeight);
+    if P2 < PCol then
+    begin
+      P := P2;
+      Inc(Result, Round(Layout.TextMetrics.width));
+    end
+    else
+    begin
+      CheckOSError(Layout.IDW.HitTestTextPosition(PCol - P, False, X, Y, HTM));
+      Inc(Result, Round(X));
+      Break;
+    end;
+  end;
 end;
 
 function TCustomSynEdit.RowColumnToPixels(const RowCol: TDisplayCoord): TPoint;
 var
-  Layout: TSynTextLayout;
   S: string;
-  X, Y: single;
-  HTM: TDwriteHitTestMetrics;
 begin
   Result.Y := (RowCol.Row - fTopLine) * fTextHeight;
 
   S := Rows[RowCol.Row];
-  if S = '' then
+  if RowCol.Column = 1 then
+    Result.X := 0
+  else if S = '' then
     Result.X := (RowCol.Column - 1) * fCharWidth
+  else if RowCol.Column > S.Length then
+     Result.X := TextWidth(S) + (RowCol.Column - S.Length - 1) * fCharWidth
   else
-  begin
-    Layout.Create(FTextFormat, PChar(S), S.Length, MaxInt, fTextHeight);
-    if RowCol.Column > S.Length then
-      Result.X := Round(Layout.TextMetrics.widthIncludingTrailingWhitespace) +
-      (RowCol.Column - S.Length - 1) * fCharWidth
-    else
-    begin
-      CheckOSError(Layout.IDW.HitTestTextPosition(RowCol.Column - 1, False, X, Y, HTM));
-      Result.X := Round(X);
-    end;
-  end;
+    Result.X := ColumnToPixels(S, RowCol.Column);
   Inc(Result.X, fTextOffset);
 end;
 
@@ -1169,18 +1291,34 @@ function TCustomSynEdit.ValidTextPos(const S: String; Index: Integer;
 var
   Layout: TSynTextLayout;
   X, Y: single;
+  P, PStart, PEnd: PChar;
   HTM: TDwriteHitTestMetrics;
 begin
-  if not InRange(Index, 2, S.Length) then
+  if not InRange(Index, 2, S.Length) or (Word(S[Index]) in [9, 32..126]) then
     Exit(Index);
 
-  Layout.Create(FTextFormat, PChar(S), S.Length, MaxInt, fTextHeight);
-  CheckOSError(Layout.IDW.HitTestTextPosition(Index - 1, False, X, Y, HTM));
+  PStart := PChar(S);
+  PEnd := PStart + S.Length - 1;
+  P := PStart + Index - 1;
 
-  if Index = Integer(HTM.textPosition) + 1 then
+  // Include at least one more character before
+  Dec(P);
+  while (P > PStart) and not (Word(P^) in [9, 32..126]) do
+    Dec(P);
+  PStart := P;
+  P := PChar(S) + Index - 1;
+  // Add characters after
+  while (P < PEnd) and not (Word((P + 1)^) in [9, 32..126]) do
+    Inc(P);
+
+  Layout.Create(FTextFormat, PStart, P - PStart + 1, MaxInt, fTextHeight);
+  CheckOSError(Layout.IDW.HitTestTextPosition(PChar(S) + Index - PStart - 1,
+    False, X, Y, HTM));
+
+  if Index + PChar(S) - PStart = Integer(HTM.textPosition) + 1 then
     Result := Index
   else
-    Result := IfThen(Trailing and (HTM.length > 1),
+    Result := PStart - PChar(S) +  IfThen(Trailing and (HTM.length > 1),
       HTM.textPosition + HTM.length + 1, HTM.textPosition + 1);
 end;
 
@@ -1199,7 +1337,6 @@ var
   CaretNearestPos : TDisplayCoord;
 begin
   CaretNearestPos := PixelsToNearestRowColumn(X, Y);
-  CaretNearestPos.Row := MinMax(CaretNearestPos.Row, 1, DisplayLineCount);
   DisplayXY := CaretNearestPos;
 end;
 
@@ -1315,8 +1452,9 @@ begin
   fGutter.OnChange := GutterChanged;
   fWordWrapGlyph := TSynGlyph.Create(HINSTANCE, 'SynEditWrapped');
   fWordWrapGlyph.OnChange := WordWrapGlyphChange;
-  ControlStyle := ControlStyle + [csOpaque, csSetCaption];
-  ControlStyle := ControlStyle + [csNeedsBorderPaint];
+  FIndicators := TSynIndicators.Create(Self);
+
+  ControlStyle := ControlStyle + [csOpaque, csSetCaption, csNeedsBorderPaint];
   Height := 150;
   Width := 200;
   Cursor := crIBeam;
@@ -1444,6 +1582,7 @@ begin
   fOrigUndoRedo := nil;
   fGutter.Free;
   fWordWrapGlyph.Free;
+  FIndicators.Free;
   fFontDummy.Free;
   fOrigLines.Free;
   fCodeFolding.Free;
@@ -1489,7 +1628,7 @@ begin
 
   // We need to recalculate line widths
   TSynEditStringList(fLines).FontChanged;
-  if fGutter.ShowLineNumbers then
+  if fGutter.ShowLineNumbers and not fGutter.UseFontStyle then
     GutterChanged(Self);
 
   // Invalidate and handle the changes
@@ -1835,7 +1974,7 @@ end;
 
 procedure TCustomSynEdit.InvalidateSelection;
 begin
-  InvalidateLines(BlockBegin.Line, BlockEnd.Line);
+  InvalidateRange(FBlockBegin, FBlockEnd);
 end;
 
 procedure TCustomSynEdit.KeyUp(var Key: Word; Shift: TShiftState);
@@ -2121,7 +2260,7 @@ begin
     ComputeScroll(X, Y);
     { compute new caret }
     P := PixelsToNearestRowColumn(X, Y);
-    P.Row := MinMax(P.Row, 1, DisplayLineCount);
+    P.Row := MinMax(P.Row, 1, DisplayRowCount);
 //  Not sure what was the purpose of these
 //    if fScrollDeltaX <> 0 then
 //      P.Column := DisplayX;
@@ -2155,7 +2294,7 @@ begin
   GetCursorPos( iMousePos );
   iMousePos := ScreenToClient( iMousePos );
   DC := PixelsToRowColumn( iMousePos.X, iMousePos.Y );
-  DC.Row := MinMax(DC.Row, 1, DisplayLineCount);
+  DC.Row := MinMax(DC.Row, 1, DisplayRowCount);
 
   if fScrollDeltaX <> 0 then
   begin
@@ -2173,7 +2312,7 @@ begin
       Y := TopLine + fScrollDeltaY;
     if fScrollDeltaY > 0 then  // scrolling down?
       Inc(Y, LinesInWindow - 1);
-    DC.Row := MinMax(Y, 1, DisplayLineCount);
+    DC.Row := MinMax(Y, 1, DisplayRowCount);
   end;
 
   BC := DisplayToBufferPos(DC);
@@ -2279,6 +2418,7 @@ procedure TCustomSynEdit.Paint;
 var
   rcClip, rcDraw: TRect;
   nL1, nL2: Integer;
+  RT: ID2D1DCRenderTarget;
 begin
   // Get the invalidated rect. Compute the invalid area in lines / columns.
   rcClip := Canvas.ClipRect;
@@ -2287,17 +2427,23 @@ begin
   // lines
   nL1 := Max(TopLine + rcClip.Top div fTextHeight, TopLine);
   nL2 := MinMax(TopLine + (rcClip.Bottom + fTextHeight - 1) div fTextHeight,
-    1, DisplayLineCount);
+    1, DisplayRowCount);
 
   // Now paint everything while the caret is hidden.
   HideCaret;
   try
+    //Create the RenderTarget
+    RT := TSynDWrite.RenderTarget;
+    RT.BindDC(Canvas.Handle, rcClip);
+    RT.BeginDraw;
+    RT.SetTransform(TD2DMatrix3X2F.Translation(-rcClip.Left, -rcClip.Top));
+
     // First paint the gutter area if it was (partly) invalidated.
     if (rcClip.Left < fGutterWidth) then
     begin
       rcDraw := rcClip;
       rcDraw.Right := fGutterWidth;
-      PaintGutter(rcDraw, nL1, nL2);
+      PaintGutter(RT, rcDraw, nL1, nL2);
     end;
 
     // Then paint the text area if it was (partly) invalidated.
@@ -2305,8 +2451,12 @@ begin
     begin
       rcDraw := rcClip;
       rcDraw.Left := Max(rcDraw.Left, fGutterWidth);
-      PaintTextLines(rcDraw, nL1, nL2);
+      PaintTextLines(RT, rcDraw, nL1, nL2);
     end;
+
+    // If there was a problem rectreate the RenderTarget
+    if RT.EndDraw <> S_OK then TSynDWrite.ResetRenderTarget;
+
     PluginsAfterPaint(Canvas, rcClip, nL1, nL2);
 
     // If there is a custom paint handler call it.
@@ -2317,16 +2467,17 @@ begin
   end;
 end;
 
-procedure TCustomSynEdit.PaintGutter(const AClip: TRect;
+procedure TCustomSynEdit.PaintGutter(RT: ID2D1RenderTarget; const AClip: TRect;
   const aFirstRow, aLastRow: Integer);
 var
   I, L, W: Integer;
   rcBackGround: TRect;
   Band: TSynGutterBand;
-  SaveIndex: Integer;
   rcBand: TRect;
   EdBkgrColor: TColor;
   Attri: TSynHighlighterAttributes;
+  Brush: ID2D1Brush;
+  GradientBrush: ID2D1LinearGradientBrush;
 begin
   // First paint gutter background
   W := 0;
@@ -2342,13 +2493,15 @@ begin
   rcBackGround := Rect(AClip.Left, AClip.Top, W, AClip.Bottom);
 
   if fGutter.Gradient then
-    SynDrawGradient(Canvas, fGutter.GradientStartColor, fGutter.GradientEndColor,
-      fGutter.GradientSteps, rcBackGround, True)
-  else
   begin
-    Canvas.Brush.Color := fGutter.Color;
-    Canvas.FillRect(rcBackGround);
-  end;
+    GradientBrush := TSynDWrite.GradientGutterBrush(fGutter.GradientStartColor,
+      fGutter.GradientEndColor);
+    GradientBrush.SetEndPoint(Point(W, 0));
+    Brush := GradientBrush;
+  end
+  else
+    Brush := TSynDWrite.SolidBrush(fGutter.Color);
+  RT.FillRectangle(rcBackGround, Brush);
 
   // Set Brush to Editor Background
   EdBkgrColor := Color;
@@ -2359,6 +2512,7 @@ begin
     if (Attri <> nil) and (Attri.Background <> clNone) then
       EdBkgrColor := Attri.Background;
   end;
+  Brush := TSynDWrite.SolidBrush(EdBkgrColor);
 
   L := 0;
   for I := 0 to FGutter.Bands.Count - 1 do
@@ -2373,30 +2527,21 @@ begin
 
     // Paint Bands with Editor Background
     if Band.Background = gbbEditor then
-    begin
-      Canvas.Brush.Color := EdBkgrColor;
-      Canvas.FillRect(rcBand);
-    end;
+      RT.FillRectangle(rcBand, Brush);
 
     //And now paint the bands
-    SaveIndex := SaveDC(Canvas.Handle);
-    try
-      IntersectClipRect(Canvas.Handle,
-        rcBand.Left, rcBand.Top, rcBand.Right, rcBand.Bottom);
-      Band.PaintLines(Canvas, rcBand, aFirstRow, aLastRow);
-    finally
-      RestoreDC(Canvas.Handle, SaveIndex);
-    end;
+    RT.PushAxisAlignedClip(rcBand, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    Band.PaintLines(RT, rcBand, aFirstRow, aLastRow);
+    RT.PopAxisAlignedClip;
     Inc(L, W);
   end;
 end;
 
-procedure TCustomSynEdit.PaintTextLines(AClip: TRect;
+procedure TCustomSynEdit.PaintTextLines(RT: ID2D1RenderTarget; AClip: TRect;
   const aFirstRow, aLastRow: Integer);
 var
-  FRT: ID2D1DCRenderTarget;
-  XLineOffset: Integer;
   LinesRect: TRect;
+  XRowOffset: Integer;
 
   function WhitespaceColor(Bkground: Boolean = True;
     ResetHighlighter: Boolean = False): TColor;
@@ -2450,7 +2595,7 @@ var
   end;
 
   procedure FullRowColors(const Row, Line: Integer;
-    var FullRowFG, FullRowBG: TColor; var BGAlpha: TD2D1ColorF);
+    var FullRowBG, FullRowFG: TColor; var BGAlpha: TD2D1ColorF);
   { Return clNone to do normal processing of text foreground/background color }
   var
     IsLineSpecial: Boolean;
@@ -2586,20 +2731,25 @@ var
 
   function YRowOffset(const Row: Integer): Integer;
   begin
-    Result := (Row - fTopLine) * fTextHeight - AClip.Top;
+    Result := (Row - fTopLine) * fTextHeight;
   end;
 
-  procedure PaintTokenBackground(Layout: TSynTextLayout;
-    const Row , Start, Len: Integer; AColor: TColor);
+  function GetTokenRect(Layout: TSynTextLayout;
+    const Row , Start, Len: Integer): TRect;
   var
     X1, Y1, X2, Y2: Single;
     HitMetrics: TDwriteHitTestMetrics;
   begin
-    Layout.IDW.HitTestTextPosition(Start - 1, False, X1, Y1, HitMetrics);
+    Layout.IDW.HitTestTextPosition(Max(Start - 1, 0), False, X1, Y1, HitMetrics);
     Layout.IDW.HitTestTextPosition(Start + Len - 2, True, X2, Y2, HitMetrics);
-    FRT.FillRectangle(
-      Rect(XLineOffset + Round(X1), YRowOffset(Row),
-           XLineOffset + Round(X2) + 1, YRowOffset(Row + 1)),
+    Result := Rect(fTextOffset + XRowOffset + Round(X1), YRowOffset(Row),
+       fTextOffset + XRowOffset + Round(X2) + 1, YRowOffset(Row + 1));
+  end;
+
+  procedure PaintTokenBackground(Layout: TSynTextLayout;
+    const Row , Start, Len: Integer; AColor: TD2D1ColorF);
+  begin
+    RT.FillRectangle(GetTokenRect(Layout, Row, Start, Len),
            TSynDWrite.SolidBrush(AColor));
   end;
 
@@ -2615,94 +2765,79 @@ var
     TabLayout.Create(FTextFormat, @SynTabGlyph, 1, Round(X2 - X1), fTextHeight);
     TabLayout.IDW.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     TabLayout.SetFontColor(TabColor, 1, 1);
-    TabLayout.Draw(FRT, XLineOffset + Round(X1), YRowOffset(Row), TabColor);
+    TabLayout.Draw(RT, FTextOffset + XRowOffset + Round(X1), YRowOffset(Row), TabColor);
   end;
 
   procedure DrawIndentGuides;
   { Only used when WordWrap is False, so rows correspond to full lines }
 
-  function StrIsBlank(S: string): Boolean;
-  var
-    I: Integer;
-  begin
-    for I := 1 to S.Length do
-      if not (Word(S[I]) in [9, 32]) then Exit(False);
-    Result := True;
-  end;
-
-  var
-    TabSteps, NonBlankLine, X, YTop, YBottom, Row, Line: Integer;
-    StrokeStyle: ID2D1StrokeStyle;
-    LinesIndents: TArray<Integer>;
-    MaxIndent: Integer;
-    SLine: string;
-  begin
-    SetLength(LinesIndents, aLastRow - aFirstRow + 1);
-
-    // Calculate LinesIndents for every line
-    MaxIndent := 0;
-    for Row := aLastRow downto aFirstRow do begin
-      Line := RowToLine(Row);  // for code folding
-      SLine := fLines[Line - 1];
-
-      if StrIsBlank(SLine) then
-      begin
-        if Row = aLastRow then
-        begin
-          // Get next nonblank line
-          NonBlankLine := Line;
-          while (NonBlankLine <= fLines.Count) and
-           StrIsBlank(fLines[NonBlankLine - 1])
-          do
-            Inc(NonBlankLine);
-          LinesIndents[Row - aFirstRow] := IfThen(NonBlankLine <= Lines.Count,
-            LeftSpaces(fLines[NonBlankLine - 1], True), 0);
-        end
-        else
-          LinesIndents[Row - aFirstRow] := LinesIndents[Row - aFirstRow + 1];
-      end
-      else
-        LinesIndents[Row - aFirstRow] := LeftSpaces(SLine, True);
-
-      MaxIndent := Max(MaxIndent, LinesIndents[Row - aFirstRow]);
+    function StrIsBlank(S: string): Boolean;
+    var
+      I: Integer;
+    begin
+      for I := 1 to S.Length do
+        if not (Word(S[I]) in [9, 32]) then Exit(False);
+      Result := True;
     end;
+
+  var
+    TabSteps, LineIndent, NonBlankLine, X, Y, Row, Line: Integer;
+    BMWidth: Integer;
+    BitmapRT: ID2D1BitmapRenderTarget;
+    BM: ID2D1Bitmap;
+    RectF: TRectF;
+    StrokeStyle: ID2D1StrokeStyle;
+    BMSize: TD2D1SizeF;
+  begin
+    BMWidth := Round(FCurrentPPI / 96) + 2;
+    BMSize := D2D1SizeF(BMWidth, FTextHeight);
 
     if FIndentGuides.Style = igsDotted then
       StrokeStyle := TSynDWrite.DottedStrokeStyle
     else
       StrokeStyle := nil;
 
-    FRT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-    // Draw the lines of each tab step
-    TabSteps := TabWidth;
-    while TabSteps < MaxIndent do
-    begin
-      X := TabSteps * CharWidth + XLineOffset;
-      if X >= 0 then
+    CheckOSError(RT.CreateCompatibleRenderTarget(@BMSize, nil, nil,
+      D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE,
+      BitmapRT));
+      BitmapRT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+      BitmapRT.BeginDraw;
+      BitmapRT.DrawLine(Point(1, 0), Point(1, fTextHeight),
+        TSynDWrite.SolidBrush(FIndentGuides.Color),
+        Round(FCurrentPPI / 96), StrokeStyle);
+      BitmapRT.EndDraw;
+      CheckOSError(BitmapRT.GetBitmap(BM));
+
+
+    for Row := aFirstRow to aLastRow do begin
+      Line := RowToLine(Row);
+      if (Line > Lines.Count) then Break;
+      // If line is blank get next nonblank line
+      NonBlankLine := Line;
+      while (NonBlankLine <= fLines.Count) and
+        StrIsBlank(fLines[NonBlankLine - 1])
+      do
+        Inc(NonBlankLine);
+      LineIndent := LeftSpaces(fLines[NonBlankLine - 1], True);
+      // Step horizontally
+      Y := YRowOffset(Row);
+      TabSteps := TabWidth;
+      while TabSteps < LineIndent do
       begin
-        Row := aFirstRow;
-        repeat
-          if LinesIndents[Row - aFirstRow] > TabSteps then
-          begin
-            // we have the top line of an indendation guide
-            YTop := YRowOffset(Row);
-            YBottom := YTop + fTextHeight;
-            while (Row < aLastRow) and (LinesIndents[Row - aFirstRow + 1] > TabSteps) do
-            begin
-              Inc(Row);
-              Inc(YBottom, fTextHeight);
-            end;
-            // Draw Line
-            FRT.DrawLine(Point(X, YTop), Point(X, YBottom),
-              TSynDWrite.SolidBrush(FIndentGuides.Color),
-              Round(FCurrentPPI / 96), StrokeStyle);
-          end;
-          Inc(Row);
-        until (Row > aLastRow);
+        X := TabSteps * CharWidth + fTextOffset;
+        if X >= 0 then
+        begin
+          RectF := Rect(X - 1, Y, X + BMWidth - 1, Y + fTextHeight);
+          // avoid having two consequtive dots
+          if (FIndentGuides.Style = igsDotted) and Odd(fTextHeight) and
+            not Odd(Row)
+          then
+            RectF.Offset(0, 1);
+          RT.DrawBitmap(BM, @RectF);
+        end;
+        Inc(TabSteps, TabWidth);
       end;
-      Inc(TabSteps, TabWidth);
     end;
-    FRT.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
   end;
 
   procedure PaintFoldMarks;
@@ -2722,7 +2857,8 @@ var
         begin
           // Get starting and end points
           Y := YRowOffset(Row + 1) - 1;
-          FRT.DrawLine(Point(0, Y), Point(LinesRect.Width, Y),
+          RT.DrawLine(Point(FGutterWidth + TextMargin, Y),
+            Point(ClientWidth, Y),
             TSynDWrite.SolidBrush(fCodeFolding.CollapsedLineColor),
             MulDiv(1, FCurrentPPI, 96));
         end;
@@ -2730,19 +2866,68 @@ var
         if fCodeFolding.ShowHintMark then
         begin
           HintRect := GetCollapseMarkRect(Row, Line);
-          HintRect.Offset(-(FGutterWidth + TextMargin), -AClip.Top);
           if HintRect.IntersectsWith(LinesRect) then
           begin
-            FRT.DrawRectangle(HintRect,
+            RT.DrawRectangle(HintRect,
               TSynDWrite.SolidBrush(fCodeFolding.CollapsedLineColor),
               FCurrentPPI/96);
             Layout.Create(FTextFormat, PChar(StringOfChar(SynSpaceGlyph, 3)), 3,
               HintRect.Width, HintRect.Height);
             Layout.IDW.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            Layout.Draw(FRT, HintRect.Left, HintRect.Top,
+            Layout.Draw(RT, HintRect.Left, HintRect.Top,
               fCodeFolding.CollapsedLineColor);
           end;
         end;
+    end;
+  end;
+
+  procedure TextRangeToDisplay(const S: string; out FirstChar, LastChar: Integer);
+  var
+    HasTabs: Boolean;
+    I: Integer;
+  begin
+    if S = '' then
+    begin
+      FirstChar := 1;
+      LastChar := IfThen(FLeftChar = 1, 0, -1); // To display CR;
+      XRowOffset := 0;
+      Exit;
+    end;
+    FirstChar := PixelsToColumn(PChar(S), S.Length,
+      (FLeftChar - 1) * FCharWidth + 1, True);
+    if FirstChar > S.Length then
+    begin
+      // nothing to display
+      FirstChar := 1;
+      LastChar := -1;
+      Exit;
+    end;
+
+    while (FirstChar > 1) and not (Word(S[FirstChar - 1]) in [9, 32..126]) do
+      Dec(FirstChar);
+
+    XRowOffset := ColumnToPixels(S, FirstChar);
+
+    LastChar := Min(FirstChar + PixelsToColumn(PChar(S) + FirstChar - 1,
+      S.Length - FirstChar + 1, ClientWidth - fTextOffset - XRowOffset),
+      S.Length);
+    while (LastChar < S.Length) and not (Word(S[LastChar + 1]) in [9, 32..126]) do
+      Inc(LastChar);
+
+    // If there are tabs *inside* the displayed range we need to make sure
+    // the are rendered at the correct place
+    HasTabs := False;
+    for I := FirstChar to LastChar do
+      if S[I] = #9 then
+      begin
+        HasTabs := True;
+        Break;
+      end;
+    if HasTabs and (LeftChar mod TabWidth <> 0) then
+    begin
+      // Unfortunately this case cannot be readily optimized
+      FirstChar := 1;
+      XRowOffset := 0;
     end;
   end;
 
@@ -2752,27 +2937,30 @@ var
     if (SelLast = MaxInt) and (I + 1 = Integer(RangeCount)) then
     begin
       if fSelectedColor.FillWholeLines then
-        SelEndX := LinesRect.Right
+        Result := LinesRect.Right
       else if eoShowSpecialChars in fOptions then
-        SelEndX := Round(Left + Width)
+        Result := Round(Left + Width)
       else
-        SelEndX := Round(Left + Width) + fCharWidth;
+        Result := Round(Left + Width) + fCharWidth;
     end
     else
-      SelEndX := Round(Left + Width);
+      Result := Round(Left + Width);
   end;
 
 var
   Line, Row, CharOffset, I: Integer;
   LayoutWidth: Integer;
   SLine, SRow: string;
+  FirstChar, LastChar: Integer;
   DoTabPainting: Boolean;
-  MarginRect: TRect;
   Layout: TSynTextLayout;
   BGColor, FGColor, TabColor: TColor;
   Token: string;
-  TokenPos: Integer;
+  TokenPos, TokenLen: Integer;
   Attr: TSynHighlighterAttributes;
+  LineIndicators: TArray<TSynIndicator>;
+  Indicator: TSynIndicator;
+  IndicatorSpec: TSynIndicatorSpec;
   AColor: TColor;
   REdgePos: Integer;
   FullRowFG, FullRowBG: TColor;
@@ -2780,83 +2968,88 @@ var
   SelBG, SelFG: TColor;
   RangeCount: Cardinal;
   BGAlpha: TD2D1ColorF;
+  HavePartialSelection: Boolean;
   HMArr: array of TDwriteHitTestMetrics;
 begin
-  XLineOffset := - (FLeftChar - 1) * FCharWidth;
-
-  // Fill TextMargin with backgournd color using GDI
-  BGColor := WhitespaceColor(True, True);  // Resets highlighter
-  Canvas.Brush.Color := BGColor;
-  MarginRect := Rect(Max(FGutterWidth, AClip.Left), AClip.Top,
-    Min(FGutterWidth + fTextMargin, AClip.Right), AClip.Bottom);
-  if not MarginRect.IsEmpty then
-    Canvas.FillRect(MarginRect);
-
-  // Switch to DirectWrite - only paint within the clip region
-  LinesRect := Rect(FGutterWidth + FTextMargin, AClip.Top, AClip.Right, AClip.Bottom);
-  if LinesRect.IsEmpty then Exit;
-
-  FRT := TSynDWrite.RenderTarget;
-  FRT.BindDC(Canvas.Handle, LinesRect);
-  FRT.BeginDraw;
   // Paint background
-  LinesRect.Offset(-FGutterWidth - FTextMargin, -AClip.Top);
-  FRT.FillRectangle(LinesRect, TSynDWrite.SolidBrush(BGColor));
-  LayoutWidth := ClientWidth - fGutterWidth - fTextMargin - XLineOffset;
+  LinesRect := Rect(FGutterWidth, AClip.Top, AClip.Right, AClip.Bottom);
+  if LinesRect.IsEmpty then Exit;
+  BGColor := WhitespaceColor(True, True);  // Resets highlighter
+  RT.FillRectangle(LinesRect, TSynDWrite.SolidBrush(BGColor));
+
+  Inc(LinesRect.Left, FTextMargin);
+
+  RT.PushAxisAlignedClip(LinesRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
   for Row:= aFirstRow to aLastRow do
   begin
     Line := RowToLine(Row);
     SLine := Lines[Line -  1];
 
-    // Get the row including control characters
     SRow := Rows[Row];
     CharOffset := DisplayToBufferPos(DisplayCoord(1, Row)).Char;
-
     DoTabPainting := False;
-    if (eoShowSpecialChars in fOptions) then
+
+    // Restrict the text to what can/should be displayed
+    TextRangeToDisplay(SRow, FirstChar, LastChar);
+
+    // Deal with eoShowSpecialChars
+    if (eoShowSpecialChars in fOptions) and (LastChar >= 0) then
     begin
-      for I := 1 to SRow.Length do
+      for I := FirstChar to LastChar do
         if SRow[I] = #32 then
           SRow[I] := SynSpaceGlyph
         else if SRow[I] = #9 then
           DoTabPainting := True;
-      if (CharOffset + SRow.Length = SLine.Length + 1) and (Line < Lines.Count) then
+      // Add LineBreak Glyph
+      if (CharOffset + LastChar = SLine.Length + 1)
+        {and (LastChar = SRow.Length)} and (Line < Lines.Count) then
+      begin
         SRow := SRow + SynLineBreakGlyph;
+        Inc(LastChar);
+      end;
     end;
 
     // Create the text layout
-    Layout.Create(FTextFormat, PChar(SRow), SRow.Length, LayoutWidth, fTextHeight);
-    if not (eoShowLigatures in FOptions) or (Line = CaretY) then
-      // No ligatures for current line
-      Layout.SetTypography(typNoLigatures, 1, SRow.Length);
+    if LastChar > 0 then
+    begin
+      LayoutWidth := ClientWidth - FTextOffset - XRowOffset;
+      Layout.Create(FTextFormat, PChar(SRow) + FirstChar - 1,
+        LastChar - FirstChar + 1, LayoutWidth, fTextHeight);
+      if not (eoShowLigatures in FOptions) or (Line = CaretY) then
+        // No ligatures for current line
+        Layout.SetTypography(typNoLigatures, 1, SRow.Length);
+    end;
 
     // Special colors, full line selection and ActiveLineColor
-    FullRowColors(Row, Line, FullRowFG, FullRowBG, BGAlpha);
+    FullRowColors(Row, Line, FullRowBG, FullRowFG, BGAlpha);
     AColor := FullRowBG;
     if (AColor = clNone) and (WhitespaceColor <> BGColor) then
       AColor := WhiteSpaceColor; // Whitespace color may differ per line
     if AColor <> clNone then
-      FRT.FillRectangle(Rect(0, YRowOffset(Row), LinesRect.Right,
+      RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row), LinesRect.Right,
         YRowOffset(Row + 1)), TSynDWrite.SolidBrush(FullRowBG));
 
     // Highlighted tokens
-    if fHighlighter <> nil then
+    if (fHighlighter <> nil) and (LastChar > 0) then
     begin
-      if Line > 1 then
-        fHighlighter.SetRange(TSynEditStringList(Lines).Ranges[Line - 2]);
-      FHighlighter.SetLine(SLine, Line);
+      if not WordWrap or (Row = aFirstRow) or (CharOffset = 1) then
+      begin
+        if Line > 1 then
+          fHighlighter.SetRange(TSynEditStringList(Lines).Ranges[Line - 2]);
+        FHighlighter.SetLine(SLine, Line);
+      end;
 
       while not FHighLighter.GetEol do
       begin
-        TokenPos := FHighLighter.GetTokenPos - CharOffset + 2; //TokenPos is zero based
-        if TokenPos > SRow.Length then Break;  // for WordWrap
-        Token := FHighLighter.GetToken;
-        if TokenPos + Token.Length <= 1 then
+        TokenPos := FHighLighter.GetTokenPos - CharOffset - FirstChar + 3; //TokenPos is zero based
+        if TokenPos > LastChar - FirstChar + 1 then Break;
+        if TokenPos + FHighLighter.GetTokenLength <= 1 then
         begin
           fHighlighter.Next;
-          Continue;  //for WordWrap
+          Continue;
         end;
+        Token := FHighLighter.GetToken;
         Attr := FHighLighter.GetTokenAttribute;
 
         if (Token <> '') and Assigned(Attr) then
@@ -2867,49 +3060,103 @@ begin
             Layout.SetFontColor(AColor, TokenPos, Token.Length);
           AColor := Attr.Background;
           if (FullRowBG = clNone) and (AColor <> clNone) then
-            PaintTokenBackground(Layout, Row, TokenPos, Token.Length, AColor);
+            PaintTokenBackground(Layout, Row, TokenPos, Token.Length, D2D1ColorF(AColor));
         end;
-        FHighLighter.Next;
+        if TokenPos + Token.Length - 1 > LastChar - FirstChar + 1 then
+          Break
+        else
+          FHighLighter.Next;
       end;
       if (eoShowSpecialChars in fOptions) and (FullRowFG = clNone) and
-        (CharOffset + SRow.Length = SLine.Length + 2) and
+        (CharOffset + LastChar = SLine.Length + 2) and
         Assigned(fHighlighter.WhitespaceAttribute) and
         (fHighlighter.WhitespaceAttribute.Foreground <> clNone)
       then
-        Layout.SetFontColor(fHighlighter.WhitespaceAttribute.Foreground, SRow.Length, 1);
+        Layout.SetFontColor(fHighlighter.WhitespaceAttribute.Foreground, LastChar - FirstChar + 1, 1);
     end;
 
     // Paint selection if Line is partially selected - deals with bidi text
     // The foreground needs to be set before we render the layout
     // The background needs to be painted before we render the layout if we
     // are not blending the selection otherwise after
-    RangeCount := 0;
-    if PartialSelection(Row, Line, SelFirst, SelLast, SelBG, SelFG) then
+    HavePartialSelection :=
+      PartialSelection(Row, Line, SelFirst, SelLast, SelBG, SelFG) and
+      (SelLast >= FirstChar) and ((SelLast = MaxInt) or (SelFirst <= LastChar));
+    if HavePartialSelection then
     begin
-      Layout.IDW.HitTestTextRange(SelFirst - 1, SelLast -SelFirst + 1,
-        XLineOffset, YRowOffset(Row), PDwriteHitTestMetrics(nil)^, 0, RangeCount);
-      SetLength(HMArr, RangeCount);
-      Layout.IDW.HitTestTextRange(SelFirst - 1, SelLast- SelFirst + 1,
-        XLineOffset, YRowOffset(Row), HMArr[0], RangeCount, RangeCount);
-      if SameValue(fSelectedColor.Alpha, 1)  then
+      if (LastChar <= 0) and (SelLast = MaxInt) and SameValue(fSelectedColor.Alpha, 1) then
       begin
-        for I := 0 to RangeCount -1  do
+        if fSelectedColor.FillWholeLines then
+          RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row),
+            LinesRect.Right,
+            YRowOffset(Row + 1)), TSynDWrite.SolidBrush(SelBG))
+        else if LeftChar = 1 then
+          RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row),
+            LinesRect.Left + fCharWidth,
+            YRowOffset(Row + 1)), TSynDWrite.SolidBrush(SelBG))
+      end
+      else if LastChar > 0 then
+      begin
+        // Adjust for First/LastChar
+        SelFirst := Max(SelFirst - FirstChar + 1, 1);
+        if SelLast <> MaxInt then
+          SelLast := SelLast - FirstChar + 1;
+
+        Layout.IDW.HitTestTextRange(SelFirst - 1, SelLast - SelFirst + 1,
+          FTextOffset, YRowOffset(Row), PDwriteHitTestMetrics(nil)^, 0, RangeCount);
+        SetLength(HMArr, RangeCount);
+        Layout.IDW.HitTestTextRange(SelFirst - 1, SelLast - SelFirst + 1,
+          FTextOffset + XRowOffset, YRowOffset(Row), HMArr[0], RangeCount, RangeCount);
+        if SameValue(fSelectedColor.Alpha, 1)  then
         begin
-          Layout.SetFontColor(SelFG, HMArr[I].textPosition + 1, HMArr[I].length);
-          FRT.FillRectangle(Rect(Round(HMArr[I].left), YRowOffset(Row),
-            SelEndX(HMArr[I].Left, HMArr[I].Width, SelLast, I, RangeCount),
-            YRowOffset(Row + 1)), TSynDWrite.SolidBrush(SelBG));
+          for I := 0 to RangeCount -1  do
+          begin
+            Layout.SetFontColor(SelFG, HMArr[I].textPosition + 1, HMArr[I].length);
+            RT.FillRectangle(Rect(Round(HMArr[I].left), YRowOffset(Row),
+              SelEndX(HMArr[I].Left, HMArr[I].Width, SelLast, I, RangeCount),
+              YRowOffset(Row + 1)), TSynDWrite.SolidBrush(SelBG));
+          end;
+          RangeCount := 0;
         end;
-        RangeCount := 0;
+      end;
+    end;
+
+    // Indicators
+    LineIndicators := FIndicators.LineIndicators(Line);
+    if Assigned(FOnGetLineIndicators) then
+      FOnGetLineIndicators(Self, Line, LineIndicators);
+
+    for Indicator in LineIndicators do
+    begin
+      TokenPos := Indicator.CharStart - CharOffset - FirstChar + 2;
+      TokenLen := Indicator.CharEnd - Indicator.CharStart;
+      if (TokenPos > LastChar - FirstChar + 1) or (TokenPos + TokenLen <= 1)
+      then
+        Continue;
+
+      IndicatorSpec := Indicators.GetSpec(Indicator.Id);
+      if (IndicatorSpec.Style = sisTextDecoration) then
+      begin
+        Layout.SetFontStyle(IndicatorSpec.FontStyle, TokenPos, TokenLen);
+        if TAlphaColorF(IndicatorSpec.Foreground) <> TAlphaColorF(clNoneF) then
+          Layout.SetFontColor(IndicatorSpec.Foreground, TokenPos, TokenLen);
+
+        // Paint Indicator background before Layout if it is not alpha blended
+        if SameValue(IndicatorSpec.Background.a, 1) then
+          PaintTokenBackground(Layout, Row, TokenPos, TokenLen,
+          IndicatorSpec.Background);
       end;
     end;
 
     // Paint the layout
-    if FullRowFG = clNone then
-      FGColor := Font.Color
-    else
-      FGColor := FullRowFG;
-    Layout.Draw(FRT, XLineOffset, YRowOffset(Row), FGColor);
+    if LastChar > 0 then
+    begin
+      if FullRowFG = clNone then
+        FGColor := Font.Color
+      else
+        FGColor := FullRowFG;
+      Layout.Draw(RT, FTextOffset + XRowOffset, YRowOffset(Row), FGColor);
+    end;
 
     // Paint tab control characters
     if DoTabPainting then
@@ -2918,15 +3165,15 @@ begin
         TabColor := FullRowFG
       else
         TabColor := WhitespaceColor(False);
-      for I := 1 to SRow.Length do
-        if SRow[I] = #9 then
+      for I := FirstChar to LastChar do
+        if (SRow[I] = #9) then
         begin
           if InRange(I, SelFirst, SelLast) and
             SameValue(fSelectedColor.Alpha, 1)
           then
-            DrawTab(Layout, Row, I, SelFG)
+            DrawTab(Layout, Row, I - FirstChar + 1, SelFG)
           else
-            DrawTab(Layout, Row, I, TabColor);
+            DrawTab(Layout, Row, I - FirstChar + 1, TabColor);
         end;
     end;
 
@@ -2936,18 +3183,53 @@ begin
     if UseCodeFolding then
       PaintFoldMarks;
 
+    // Indicators
+    for Indicator in LineIndicators do
+    begin
+      TokenPos := Indicator.CharStart - CharOffset - FirstChar + 2;
+      TokenLen := Indicator.CharEnd - Indicator.CharStart;
+      if (TokenPos > LastChar - FirstChar + 1) or (TokenPos + TokenLen <= 1)
+      then
+        Continue;
+
+      IndicatorSpec := Indicators.GetSpec(Indicator.Id);
+      Indicators.Paint(RT, IndicatorSpec,
+        GetTokenRect(Layout, Row, TokenPos, TokenLen),
+        IfThen(TokenPos < 1,
+          TextWidth(Copy(SLine, Indicator.CharStart, 1 - TokenPos)), 0));
+    end;
+
     // Alpha blend selection
     if TAlphaColorF(BGAlpha) <> TAlphaColorF(clNoneF) then
       // Full Row
-      FRT.FillRectangle(Rect(0, YRowOffset(Row), LinesRect.Right,
+      RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row), LinesRect.Right,
         YRowOffset(Row + 1)), TSynDWrite.SolidBrush(BGAlpha));
     // partial selection
-    for I := 0 to Integer(RangeCount) - 1 do
-      FRT.FillRectangle(Rect(Round(HMArr[I].left), YRowOffset(Row),
-        SelEndX(HMArr[I].Left, HMArr[I].Width, SelLast, I, RangeCount),
-        YRowOffset(Row + 1)),
-        TSynDWrite.SolidBrush(D2D1ColorF(fSelectedColor.Background,
-        fSelectedColor.Alpha)));
+    if HavePartialSelection then
+    begin
+      if (LastChar <= 0) and (SelLast = MaxInt) then
+      begin
+        if fSelectedColor.FillWholeLines then
+          RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row),
+            LinesRect.Right, YRowOffset(Row + 1)),
+            TSynDWrite.SolidBrush(D2D1ColorF(fSelectedColor.Background,
+              fSelectedColor.Alpha)))
+        else if LeftChar = 1 then
+          RT.FillRectangle(Rect(LinesRect.Left, YRowOffset(Row),
+            LinesRect.Left + fCharWidth, YRowOffset(Row + 1)),
+            TSynDWrite.SolidBrush(D2D1ColorF(fSelectedColor.Background,
+              fSelectedColor.Alpha)));
+      end
+      else if LastChar > 0 then
+      begin
+        for I := 0 to Integer(RangeCount) - 1 do
+          RT.FillRectangle(Rect(Round(HMArr[I].left), YRowOffset(Row),
+            SelEndX(HMArr[I].Left, HMArr[I].Width, SelLast, I, RangeCount),
+            YRowOffset(Row + 1)),
+            TSynDWrite.SolidBrush(D2D1ColorF(fSelectedColor.Background,
+            fSelectedColor.Alpha)));
+      end;
+    end;
   end;
 
   // Draw right edge
@@ -2955,12 +3237,12 @@ begin
   begin
     REdgePos := fRightEdge * fCharWidth; // pixel value
     if InRange(REdgePos + fTextOffset, AClip.Left, AClip.Right) then
-      FRT.DrawLine(Point(XLineOffset + REdgePos, 0),
-        Point(XLineOffset + REdgePos, AClip.Height),
+      RT.DrawLine(Point(FTextOffset + REdgePos, AClip.Top),
+        Point(FTextOffset + REdgePos, AClip.Bottom),
         TSynDWrite.SolidBrush(fRightEdgeColor));
   end;
 
-  if FRT.EndDraw <> S_OK then TSynDWrite.ResetRenderTarget;
+  RT.PopAxisAlignedClip;
 end;
 
 procedure TCustomSynEdit.PasteFromClipboard;
@@ -3333,6 +3615,8 @@ var
   iDelta: Integer;
   iTextArea: TRect;
 begin
+  if Value = FLeftChar then Exit;
+
 	// when wrapping with right edge and right edge is behind the window width
   if WordWrap and not ((eoWrapWithRightEdge in FOptions) and
     (WrapAreaWidth > FTextAreaWidth))
@@ -3699,9 +3983,9 @@ var
   Delta: Integer;
 begin
   if (eoScrollPastEof in Options) then
-    Value := Min(Value, DisplayLineCount)
+    Value := Min(Value, DisplayRowCount)
   else
-    Value := Min(Value, DisplayLineCount - fLinesInWindow + 1);
+    Value := Min(Value, DisplayRowCount - fLinesInWindow + 1);
   Value := Max(Value, 1);
   if Value <> TopLine then
   begin
@@ -4077,7 +4361,7 @@ end;
 
 procedure TCustomSynEdit.WMHScroll(var Msg: TWMScroll);
 begin
-  FSynEditScrollBars.WMHScroll(Msg, FIsScrolling);
+  FSynEditScrollBars.WMHScroll(Msg);
 end;
 
 procedure TCustomSynEdit.WMImeChar(var Msg: TMessage);
@@ -4207,7 +4491,7 @@ end;
 
 procedure TCustomSynEdit.WMVScroll(var Msg: TWMScroll);
 begin
-  FSynEditScrollBars.WMVScroll(Msg, FIsScrolling);
+  FSynEditScrollBars.WMVScroll(Msg);
 end;
 
 function TCustomSynEdit.ScanFrom(Index: Integer): Integer;
@@ -4263,14 +4547,11 @@ end;
 
 procedure TCustomSynEdit.ListDeleted(Sender: TObject; aIndex: Integer;
   aCount: Integer);
-//++ CodeFolding
 Var
   vLastScan: Integer;
 begin
   if WordWrap then
     fWordWrapPlugin.LinesDeleted(aIndex, aCount);
-
-  DoLinesDeleted(aIndex, aCount);
 
   vLastScan := aIndex;
   if Assigned(fHighlighter) and (Lines.Count > 0) then
@@ -4282,44 +4563,22 @@ begin
     ReScanForFoldRanges(aIndex, vLastScan);
     InvalidateGutterBand(gbkFold);
   end;
-//-- CodeFolding
+
+  DoLinesDeleted(aIndex, aCount);
 
   InvalidateLines(aIndex + 1, MaxInt);
   InvalidateGutterLines(aIndex + 1, MaxInt);
-//++ Flicker Reduction
   Include(fStateFlags, sfScrollbarChanged);
-//-- Flicker Reduction
 end;
 
 procedure TCustomSynEdit.ListInserted(Sender: TObject; Index: Integer;
   aCount: Integer);
 var
-  I, vLastScan: Integer;
+  vLastScan: Integer;
   FoldIndex: Integer;
 begin
   if WordWrap then
-    fWordWrapPlugin.LinesInserted(Index, aCount)
-{$if CompilerVersion >= 32}
-  else
-  begin
-    // Activate WordWrap when you have super long lines (#157)
-    for I := Index to Index + aCount - 1 do
-      if Lines[I].Length > 10000 then   // Magic number
-      begin
-        TThread.ForceQueue(nil, procedure
-        begin
-          UseCodeFolding := False;
-          Include(fOptions, eoWrapWithRightEdge);
-          if fRightEdge = 0 then
-            fRightEdge := 80;
-          WordWrap := True;
-        end);
-        Break;
-      end;
-  end
-{$endif};
-
-  DoLinesInserted(Index, aCount);
+    fWordWrapPlugin.LinesInserted(Index, aCount);
 
   vLastScan := Index;
   if Assigned(fHighlighter) and (Lines.Count > 0) then
@@ -4330,7 +4589,6 @@ begin
     until vLastScan >= Index + aCount;
   end;
 
-//++ CodeFolding
   if UseCodeFolding then begin
     if fAllFoldRanges.CollapsedFoldStartAtLine(Index, FoldIndex) then
       // insertion starts at collapsed fold
@@ -4339,26 +4597,22 @@ begin
     // Scan the same lines the highlighter has scanned
     ReScanForFoldRanges(Index, vLastScan-1);
   end;
-//-- CodeFolding
+
+  DoLinesInserted(Index, aCount);
 
   InvalidateLines(Index + 1, MaxInt);
   InvalidateGutterLines(Index + 1, MaxInt);
-//++ Flicker Reduction
+  // Flicker Reduction
   Include(fStateFlags, sfScrollbarChanged);
-//-- Flicker Reduction
 end;
 
 procedure TCustomSynEdit.ListPut(Sender: TObject; Index: Integer;
   const OldLine: string);
 var
   vEndLine: Integer;
-//++ CodeFolding
   vLastScan: Integer;
   FoldIndex: Integer;
-//-- CodeFolding
 begin
-  DoLinePut(Index, OldLine);
-
   vEndLine := Index +1;
   if WordWrap and (fWordWrapPlugin.LinePut(Index, OldLine) <> 0) then
     vEndLine := MaxInt;
@@ -4381,6 +4635,8 @@ begin
     // Scan the same lines the highlighter has scanned
     ReScanForFoldRanges(Index, vLastScan);
   end;
+
+  DoLinePut(Index, OldLine);
 
   InvalidateLines(Index + 1, vEndLine);
   InvalidateGutterLines(Index + 1, vEndLine);
@@ -4497,7 +4753,6 @@ begin
   end;
 end;
 
-//++ CodeFolding
 procedure TCustomSynEdit.Collapse(FoldRangeIndex: Integer; Invalidate:Boolean);
 begin
   AllFoldRanges.Ranges.List[FoldRangeIndex].Collapsed := True;
@@ -5228,10 +5483,8 @@ begin
 end;
 
 procedure TCustomSynEdit.SetHighlighter(const Value: TSynCustomHighlighter);
-//++ CodeFolding
 Var
   OldUseCodeFolding : Boolean;
-//-- CodeFolding
 begin
   if Value <> fHighlighter then
   begin
@@ -5249,14 +5502,12 @@ begin
     if not(csDestroying in ComponentState) then
       HighlighterAttrChanged(fHighlighter);
 
-//++ CodeFolding
     //  Disable Code Folding if not supported by highlighter
     OldUseCodeFolding := fUseCodeFolding;
     UseCodeFolding := False;
     UseCodeFolding := OldUseCodeFolding;
     if fHighlighter is TSynCustomCodeFoldingHighlighter then
       TSynCustomCodeFoldingHighlighter(fHighlighter).InitFoldRanges(fAllFoldRanges);
-//-- CodeFolding
   end;
 end;
 
@@ -5534,13 +5785,55 @@ begin
 end;
 
 function TCustomSynEdit.TextWidth(const S: string): Integer;
+begin
+  Result := TextWidth(PChar(S), S.Length);
+end;
+
+function TCustomSynEdit.TextWidth(P: PChar; Len: Integer): Integer;
+{ Ascii caracters are assumed to be fixed width.  Remaining text sequences
+  are measured using TSynTextLayout }
 var
   Layout: TSynTextLayout;
+  P2, PStart, PEnd: PChar;
 begin
-  if S = '' then Exit(0);
+  if P^ = #0 then Exit(0);
 
-  Layout.Create(FTextFormat, PChar(S), S.Length, MaxInt, Maxint);
-  Result := Round(Layout.TextMetrics.widthIncludingTrailingWhitespace);
+  PStart := P;
+  PEnd:= P + Len;
+  Result := 0;
+
+  while P < PEnd do
+  begin
+    while P < PEnd do
+    begin
+      case P^ of
+         #9: Inc(Result, fTabWidth * fCharWidth - Result mod (fTabWidth * fCharWidth));
+         #32..#126: Inc(Result, FCharWidth);
+       else
+         break;
+       end;
+       Inc(P);
+    end;
+
+    if P >= PEnd then Break;
+
+    // Just in case P is followed by combining characters
+    if (P > PStart) and not (Word((P-1)^) in [9, 32]) then
+    begin
+      Dec(P);
+      Dec(Result, FCharWidth);
+    end;
+    // Measure non-ascii text code points
+    P2 := P;
+    while P2 < PEnd do
+    begin
+      Inc(P2);
+      if Word(P2^) in [9, 32..126] then Break;
+    end;
+    Layout.Create(FTextFormat, P, P2-P, MaxInt, fTextHeight);
+    Inc(Result, Round(Layout.TextMetrics.width));
+    P := P2;
+  end;
 end;
 
 // If the translations requires Data, memory will be allocated for it via a
@@ -5736,14 +6029,12 @@ begin
           MoveCaretAndSelection(CaretNew, Command = ecSelEditorBottom);
           Update;
         end;
-// goto special line / column position
       ecGotoXY, ecSelGotoXY:
         if Assigned(Data) then
         begin
           MoveCaretAndSelection(TBufferCoord(Data^), Command = ecSelGotoXY);
           Update;
         end;
-// word selection
       ecWordLeft, ecSelWordLeft:
         begin
           CaretNew := PrevWordPos;
@@ -5814,9 +6105,10 @@ begin
                 begin
                   BeginUndoBlock;
                   try
+                    CaretXNew := Lines[CaretY - 2].Length + 1;
                     Lines[CaretY - 2] := Lines[CaretY - 2] + Temp;
                     Lines.Delete(CaretY - 1);
-                    CaretXY := BufferCoord(Lines[CaretY - 2].Length + 1, CaretY - 1);
+                    CaretXY := BufferCoord(CaretXNew, CaretY - 1);
                   finally
                     EndUndoBlock;
                   end;
@@ -6168,7 +6460,6 @@ begin
         InsertCharAtCursor(PWideChar(Data));
       ecCopyLineUp, ecCopyLineDown, ecMoveLineUp, ecMoveLineDown:
         ExecCmdCopyOrMoveLine(Command);
-//++ CodeFolding
       ecFoldAll: begin CollapseAll; end;
       ecUnfoldAll: begin UncollapseAll; end;
       ecFoldNearest: begin CollapseNearest; end;
@@ -6181,7 +6472,6 @@ begin
       ecUnfoldLevel3: begin UncollapseLevel(3); end;
       ecFoldRegions: begin CollapseFoldType(FoldRegionType) end;
       ecUnfoldRegions: begin UnCollapseFoldType(FoldRegionType) end;
-//-- CodeFolding
     end;
   finally
     DecPaintLock;
@@ -6546,6 +6836,28 @@ procedure TCustomSynEdit.ClearUndo;
 begin
   fUndoRedo.Clear;
   ClearTrackChanges;
+end;
+
+procedure TCustomSynEdit.CMHintShow(var Message: TCMHintShow);
+var
+  CanShow: Boolean;
+  HintStr: string;
+begin
+  if Assigned(fOnShowHint) then
+  begin
+    HintStr := Message.HintInfo.HintStr;
+    CanShow := HintStr <> '';
+    fOnShowHint(HintStr, CanShow, Message.HintInfo^);
+    if CanShow then
+    begin
+      Message.Result := 0;
+      Message.HintInfo.HintStr := HintStr;
+    end
+    else
+      Message.Result := 1;
+  end
+  else
+    inherited;;
 end;
 
 procedure TCustomSynEdit.SetGutter(const Value: TSynGutter);
@@ -6983,7 +7295,7 @@ begin
     Dec(Dst.Row);
     Dst.Column := Length(Rows[Dst.Row]) + 1;
   end
-  else if ChangeY and (DX = 1) and (Dst.Column > RowLen) and (Dst.Row < DisplayLineCount) then
+  else if ChangeY and (DX = 1) and (Dst.Column > RowLen) and (Dst.Row < DisplayRowCount) then
   begin
     // start of next row
     Inc(Dst.Row);
@@ -7004,6 +7316,7 @@ procedure TCustomSynEdit.MoveCaretVert(DY: Integer; SelectionCommand: Boolean);
 var
   Org, Dst: TDisplayCoord;
   SaveLastPosX: Integer;
+  SDestRow: string;
 begin
   Org := DisplayXY;
   Dst := Org;
@@ -7012,7 +7325,7 @@ begin
   if DY >= 0 then
   begin
     if RowToLine(Dst.Row) > Lines.Count then
-      Dst.Row := Max(1, DisplayLineCount);
+      Dst.Row := Max(1, DisplayRowCount);
   end
   else
     Dst.Row := Max(Dst.Row, 1);
@@ -7020,7 +7333,10 @@ begin
   if (Org.Row <> Dst.Row) then
   begin
     if eoKeepCaretX in Options then
-      Dst.Column := PixelsToColumn(Rows[Dst.Row], FLastPosX);
+    begin
+      SDestRow := Rows[Dst.Row];
+      Dst.Column := PixelsToColumn(PChar(SDestRow), SDestRow.Length, FLastPosX);
+    end;
   end;
   Dst.Column := ValidTextPos(Rows[Dst.Row], Dst.Column, False);
 
@@ -7333,6 +7649,26 @@ begin
   EnsureCursorPosVisible;
 end;
 
+procedure TCustomSynEdit.PaintText(S: string; P: TPoint; ClipR: TRect;
+  FontStyle: TFontStyles; FontColor: TColor; BkgColor: TColor = clNone);
+{ Support routine that can be used in plugins, handlers of AfterPaint etc.
+  P is relative to ClipRect }
+var
+  RT: ID2D1DCRenderTarget;
+  Layout: TSynTextLayout;
+begin
+  Layout.Create(FTextFormat, PChar(S), S.Length, MaxInt, fTextHeight);
+  Layout.SetFontStyle(FontStyle, 1, S.Length);
+  RT := TSynDWrite.RenderTarget;
+  RT.SetTransform(TD2DMatrix3X2F.Identity);
+  RT.BindDC(Canvas.Handle, ClipR);
+  RT.BeginDraw;
+  if BkgColor <> clNone then
+    RT.Clear(D2D1ColorF(BkgColor));
+  Layout.Draw(RT, P.X, P.Y, FontColor);
+  if RT.EndDraw <> S_OK then TSynDWrite.ResetRenderTarget;
+end;
+
 procedure TCustomSynEdit.DoShiftTabKey;
 // shift-tab key handling
 var
@@ -7465,6 +7801,37 @@ begin
   end;
 
   UpdateScrollBars;
+end;
+
+procedure TCustomSynEdit.InvalidateRange(const BB, BE: TBufferCoord);
+var
+  DB, DE: TDisplayCoord;
+  P1, P2: TPoint;
+  R : TRect;
+begin
+  if BB.Line <> BE.Line then
+    InvalidateLines(BB.Line, BE.Line)
+  else
+  begin
+    DB := BufferToDisplayPos(BB);
+    DE := BufferToDisplayPos(BE);
+    if DB.Row <> DE.Row then
+      InvalidateLine(BB.Line)
+    else
+    begin
+      // part of a row
+      if not InRange(DB.Row, TopLine, TopLine + LinesInWindow) or
+        (DB.Column = DE.Column)
+      then
+        Exit;
+      P1 := RowColumnToPixels(DB);
+      P2 := RowColumnToPixels(DE);
+      R := Rect(P1.X, fTextHeight * (DB.Row - TopLine), P2.X,
+        fTextHeight * (DB.Row - TopLine + 1));
+      R.NormalizeRect;
+      InvalidateRect(R, False);
+    end;
+  end;
 end;
 
 procedure TCustomSynEdit.InvalidateRect(const aRect: TRect; aErase: Boolean);
@@ -7718,9 +8085,7 @@ begin
   if (not HandleAllocated) or (Line < 1) or (Line > Lines.Count) or (not Visible) then
     Exit;
 
-//++ CodeFolding
   if UseCodeFolding or WordWrap then
-//-- CodeFolding
   begin
     InvalidateLines(Line, Line);
     Exit;
@@ -7960,26 +8325,23 @@ begin
     Result := 0;
 end;
 
+function TCustomSynEdit.GetIsScrolling: Boolean;
+begin
+  Result := FSynEditScrollBars.IsScrolling;
+end;
+
 procedure TCustomSynEdit.RegisterCommandHandler(
   const AHandlerProc: THookedCommandEvent; AHandlerData: pointer);
 begin
   if not Assigned(AHandlerProc) then
   begin
-{$IFDEF SYN_DEVELOPMENT_CHECKS}
-    raise Exception.Create('Event handler is NIL in RegisterCommandHandler');
-{$ENDIF}
     exit;
   end;
   if not Assigned(fHookedCommandHandlers) then
     fHookedCommandHandlers := TObjectList.Create;
   if FindHookedCmdEvent(AHandlerProc) = -1 then
     fHookedCommandHandlers.Add(THookedCommandHandlerEntry.Create(
-      AHandlerProc, AHandlerData))
-  else
-{$IFDEF SYN_DEVELOPMENT_CHECKS}
-    raise Exception.CreateFmt('Event handler (%p, %p) already registered',
-      [TMethod(AHandlerProc).Data, TMethod(AHandlerProc).Code]);
-{$ENDIF}
+      AHandlerProc, AHandlerData));
 end;
 
 procedure TCustomSynEdit.UnregisterCommandHandler(AHandlerProc:
@@ -7988,20 +8350,10 @@ var
   i: Integer;
 begin
   if not Assigned(AHandlerProc) then
-  begin
-{$IFDEF SYN_DEVELOPMENT_CHECKS}
-    raise Exception.Create('Event handler is NIL in UnregisterCommandHandler');
-{$ENDIF}
     exit;
-  end;
   i := FindHookedCmdEvent(AHandlerProc);
   if i > -1 then
-    fHookedCommandHandlers.Delete(i)
-  else
-{$IFDEF SYN_DEVELOPMENT_CHECKS}
-    raise Exception.CreateFmt('Event handler (%p, %p) is not registered',
-      [TMethod(AHandlerProc).Data, TMethod(AHandlerProc).Code]);
-{$ENDIF}
+    fHookedCommandHandlers.Delete(i);
 end;
 
 procedure TCustomSynEdit.NotifyHookedCommandHandlers(AfterProcessing: Boolean;
@@ -8208,6 +8560,9 @@ begin
     else if Marks[i].Line > FirstLine then
       Marks[i].Line := FirstLine;
 
+  // SynIndicators
+  FIndicators.LinesDeleted(FirstLine, Count);
+
   // plugins
   if fPlugins <> nil then
     for i := 0 to fPlugins.Count - 1 do
@@ -8224,12 +8579,15 @@ var
   Plugin: TSynEditPlugin;
 begin
   fGutter.AutoSizeDigitCount;
-  // gutter marks
+  // Gutter marks
   for i := 0 to Marks.Count - 1 do
     if Marks[i].Line >= FirstLine then
       Marks[i].Line := Marks[i].Line + Count;
 
-  // plugins
+  // SynIndicators
+  FIndicators.LinesInserted(FirstLine, Count);
+
+  // Plugins
   if fPlugins <> nil then
     for i := 0 to fPlugins.Count - 1 do
     begin
@@ -8239,18 +8597,21 @@ begin
     end;
 end;
 
-procedure TCustomSynEdit.DoLinePut(FirstLine: Integer; const OldLine: string);
+procedure TCustomSynEdit.DoLinePut(Index: Integer; const OldLine: string);
 var
   i: Integer;
   Plugin: TSynEditPlugin;
 begin
+  // SynIndicators
+  FIndicators.LinePut(Index);
+
   // plugins
   if fPlugins <> nil then
     for i := 0 to fPlugins.Count - 1 do
     begin
       PlugIn := TSynEditPlugin(fPlugins[i]);
       if phLinePut in Plugin.Handlers then
-        Plugin.LinePut(FirstLine, OldLine);
+        Plugin.LinePut(Index, OldLine);
     end;
 end;
 
@@ -8880,7 +9241,7 @@ begin
   end;
 end;
 
-function TCustomSynEdit.GetDisplayLineCount: Integer;
+function TCustomSynEdit.GetDisplayRowCount: Integer;
 begin
   if fWordWrapPlugin = nil then begin
     if fUseCodeFolding then

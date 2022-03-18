@@ -104,21 +104,29 @@ function EnumHighlighterAttris(Highlighter: TSynCustomHighlighter;
   SkipDuplicates: Boolean; HighlighterAttriProc: THighlighterAttriProc;
   Params: array of Pointer): Boolean;
 
+type
+  // Procedural type for adding keyword entries when enumerating keyword
+  // lists using the EnumerateKeywords procedure below.
+  TEnumerateKeywordEvent = procedure(AKeyword: string; AKind: integer)
+    of object;
+
+  //  This procedure will call AKeywordProc for all keywords in KeywordList. A
+  //  keyword is considered any number of successive chars that are contained in
+  //  Identifiers, with chars not contained in Identifiers before and after them.
+  procedure EnumerateKeywords(AKind: integer; KeywordList: string;
+    IsIdentChar: TCategoryMethod; AKeywordProc: TEnumerateKeywordEvent);
+
 {$IFDEF SYN_HEREDOC}
 // Calculates Frame Check Sequence (FCS) 16-bit Checksum (as defined in RFC 1171)
 function CalcFCS(const ABuf; ABufSize: Cardinal): Word;
 {$ENDIF}
-procedure SynDrawGradient(const ACanvas: TCanvas;
-  const AStartColor, AEndColor: TColor; ASteps: Integer; const ARect: TRect;
-  const AHorizontal: Boolean);
-
 function DeleteTypePrefixAndSynSuffix(s: string): string;
 function CeilOfIntDiv(Dividend, Divisor: Cardinal): Integer;
 
 // In Windows Vista or later use the Consolas font
 function DefaultFontName: string;
 
-function IsFontMonospacedAndValid(Font: TFont): Boolean;
+function GetCorrectFontWeight(Font: TFont): Integer;
 
 {$IF CompilerVersion <= 32}
 function GrowCollection(OldCapacity, NewCount: Integer): Integer;
@@ -127,6 +135,7 @@ function GrowCollection(OldCapacity, NewCount: Integer): Integer;
 implementation
 
 uses
+  System.UITypes,
   System.SysUtils,
   SynHighlighterMulti,
   Winapi.D2D1,
@@ -613,6 +622,36 @@ begin
   end
 end;
 
+procedure EnumerateKeywords(AKind: integer; KeywordList: string;
+  IsIdentChar: TCategoryMethod; AKeywordProc: TEnumerateKeywordEvent);
+var
+  pStart, pEnd: PWideChar;
+  Keyword: string;
+begin
+  if Assigned(AKeywordProc) and (KeywordList <> '') then
+  begin
+    pEnd := PWideChar(KeywordList);
+    pStart := pEnd;
+    repeat
+      // skip over chars that are not in Identifiers
+      while (pStart^ <> #0) and not IsIdentChar(pStart^) do
+        Inc(pStart);
+      if pStart^ = #0 then break;
+      // find the last char that is in Identifiers
+      pEnd := pStart + 1;
+      while (pEnd^ <> #0) and IsIdentChar(pEnd^) do
+        Inc(pEnd);
+      // call the AKeywordProc with the keyword
+      SetString(Keyword, pStart, pEnd - pStart);
+      AKeywordProc(Keyword, AKind);
+      Keyword := '';
+      // pEnd points to a char not in Identifiers, restart after that
+      if pEnd^ <> #0 then
+        pStart := pEnd + 1;
+    until (pStart^ = #0) or (pEnd^ = #0);
+  end;
+end;
+
 {$IFDEF SYN_HEREDOC}
 // Fast Frame Check Sequence (FCS) Implementation
 // Translated from sample code given with RFC 1171 by Marko Njezic
@@ -660,63 +699,6 @@ begin
 end;
 {$ENDIF}
 
-procedure SynDrawGradient(const ACanvas: TCanvas;
-  const AStartColor, AEndColor: TColor; ASteps: Integer; const ARect: TRect;
-  const AHorizontal: Boolean);
-var
-  StartColorR, StartColorG, StartColorB: Byte;
-  DiffColorR, DiffColorG, DiffColorB: Integer;
-  i, Size: Integer;
-  PaintRect: TRect;
-begin
-  StartColorR := GetRValue(ColorToRGB(AStartColor));
-  StartColorG := GetGValue(ColorToRGB(AStartColor));
-  StartColorB := GetBValue(ColorToRGB(AStartColor));
-
-  DiffColorR := GetRValue(ColorToRGB(AEndColor)) - StartColorR;
-  DiffColorG := GetGValue(ColorToRGB(AEndColor)) - StartColorG;
-  DiffColorB := GetBValue(ColorToRGB(AEndColor)) - StartColorB;
-
-  ASteps := MinMax(ASteps, 2, 256);
-
-  if AHorizontal then
-  begin
-    Size := ARect.Right - ARect.Left;
-    PaintRect.Top := ARect.Top;
-    PaintRect.Bottom := ARect.Bottom;
-
-    for i := 0 to ASteps - 1 do
-    begin
-      PaintRect.Left := ARect.Left + MulDiv(i, Size, ASteps);
-      PaintRect.Right := ARect.Left + MulDiv(i + 1, Size, ASteps);
-
-      ACanvas.Brush.Color := RGB(StartColorR + MulDiv(i, DiffColorR,
-        ASteps - 1), StartColorG + MulDiv(i, DiffColorG, ASteps - 1),
-        StartColorB + MulDiv(i, DiffColorB, ASteps - 1));
-
-      ACanvas.FillRect(PaintRect);
-    end;
-  end
-  else
-  begin
-    Size := ARect.Bottom - ARect.Top;
-    PaintRect.Left := ARect.Left;
-    PaintRect.Right := ARect.Right;
-
-    for i := 0 to ASteps - 1 do
-    begin
-      PaintRect.Top := ARect.Top + MulDiv(i, Size, ASteps);
-      PaintRect.Bottom := ARect.Top + MulDiv(i + 1, Size, ASteps);
-
-      ACanvas.Brush.Color := RGB(StartColorR + MulDiv(i, DiffColorR,
-        ASteps - 1), StartColorG + MulDiv(i, DiffColorG, ASteps - 1),
-        StartColorB + MulDiv(i, DiffColorB, ASteps - 1));
-
-      ACanvas.FillRect(PaintRect);
-    end;
-  end;
-end;
-
 function CeilOfIntDiv(Dividend, Divisor: Cardinal): Integer;
 Var
   Res: UInt64;
@@ -736,44 +718,33 @@ begin
     Result := 'Courier New';
 end;
 
-function EnumFontsProc(EnumLogFontExDV: PEnumLogFontExDV;
+function WeightEnumFontsProc(EnumLogFontExDV: PEnumLogFontExDV;
   EnumTextMetric: PEnumTextMetric;
   FontType: DWORD; LParam: LPARAM): Integer; stdcall;
 begin;
-  PBoolean(LPARAM)^ :=
-    (EnumLogFontExDV.elfEnumLogfontEx.elfLogFont.lfPitchAndFamily and FIXED_PITCH) = FIXED_PITCH;
+  PInteger(LPARAM)^ :=  EnumLogFontExDV.elfEnumLogfontEx.elfLogFont.lfWeight;
   Result := 0;
 end;
 
-function IsFontMonospacedAndValid(Font: TFont): Boolean;
+function GetCorrectFontWeight(Font: TFont): Integer;
 var
   DC: HDC;
   LogFont: TLogFont;
-  DWFont: IDWriteFont;
-  IsMonoSpaced: Boolean;
 begin
-  Result := Screen.Fonts.IndexOf(Font.Name) >= 0;
-  if not Result then Exit;
-
-  // Is it fixed pitch?
-  DC := GetDC(0);
-  IsMonospaced := False;
-  FillChar(LogFont, SizeOf(LogFont), 0);
-  LogFont.lfCharSet := DEFAULT_CHARSET;
-  StrPLCopy(LogFont.lfFaceName, Font.Name, Length(LogFont.lfFaceName) - 1);
-  EnumFontFamiliesEx(DC, LogFont, @EnumFontsProc, LPARAM(@IsMonospaced), 0);
-  ReleaseDC(0, DC);
-  Result := IsMonospaced;
-  if not Result then Exit;
-
-  // Can it be used by DirectWrite?
-  try
-    Assert(GetObject(Font.Handle, SizeOf(TLogFont), @LogFont) <> 0);
-    CheckOSError(TSynDWrite.GDIInterop.CreateFontFromLOGFONT(LogFont, DWFont));
-  except
-    Result := False;
+  if TFontStyle.fsBold in Font.Style then
+    Result := FW_BOLD
+  else
+  begin
+    Result := FW_NORMAL;
+    DC := GetDC(0);
+    FillChar(LogFont, SizeOf(LogFont), 0);
+    LogFont.lfCharSet := DEFAULT_CHARSET;
+    StrPLCopy(LogFont.lfFaceName, Font.Name, Length(LogFont.lfFaceName) - 1);
+    EnumFontFamiliesEx(DC, LogFont, @WeightEnumFontsProc, LPARAM(@Result), 0);
+    ReleaseDC(0, DC);
   end;
 end;
+
 
 {$IF CompilerVersion <= 32}
 function GrowCollection(OldCapacity, NewCount: Integer): Integer;

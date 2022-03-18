@@ -67,23 +67,26 @@ type
   TSynEditScrollBars = class(TInterfacedObject, ISynEditScrollBars)
   private
     FOwner: TCustomSynEdit;
+    FIsScrolling: Boolean;
     FMouseWheelVertAccumulator: Integer;
     FMouseWheelHorzAccumulator: Integer;
     FPrevHorzSBState: TSynScrollBarState;  // Last applied horizontal scrollbar state
     FPrevVertSBState: TSynScrollBarState;  // Last applied vertical scrollbar state
     FNewHorzSBState: TSynScrollBarState;   // New Horizontal ScrollBar state
     FNewVertSBState: TSynScrollBarState;   // New Vertical ScrollBar state
+    function GetIsScrolling: Boolean;
     function GetHorzPageInChars: Integer;
     function GetBarScrollInfo(AKind: TScrollBarKind): TScrollInfo;
     procedure SetScrollBarFromState(const AState: TSynScrollBarState);
+    procedure SetScrollBarPos(AKind: TScrollBarKind; APos: Integer; ARefresh: Boolean);
     procedure ApplyButtonState(const AState: TSynScrollBarState);
     procedure UpdateScrollBarsState;
   public
     constructor Create(AOwner: TCustomSynEdit);
     destructor Destroy; override;
     function UpdateScrollBars: Boolean;
-    procedure WMHScroll(var AMsg: TWMScroll; var AIsScrolling: Boolean);
-    procedure WMVScroll(var AMsg: TWMScroll; var AIsScrolling: Boolean);
+    procedure WMHScroll(var AMsg: TWMScroll);
+    procedure WMVScroll(var AMsg: TWMScroll);
     procedure DoMouseWheel(Shift: TShiftState; WheelDelta: Integer;
       MousePos: TPoint);
   end;
@@ -121,6 +124,11 @@ begin
   Result := FOwner.TextAreaWidth div FOwner.CharWidth;
 end;
 
+function TSynEditScrollBars.GetIsScrolling: Boolean;
+begin
+  Result := FIsScrolling;
+end;
+
 procedure TSynEditScrollBars.ApplyButtonState(const AState: TSynScrollBarState);
 var
   BarKind: Integer;
@@ -148,6 +156,23 @@ begin
     if not Btn2Enabled then
       EnableScrollBar(FOwner.Handle, BarKind, ESB_DISABLE_RTDN);
   end;
+end;
+
+procedure TSynEditScrollBars.SetScrollBarPos(AKind: TScrollBarKind;
+  APos: Integer; ARefresh: Boolean);
+var
+  BarKind: Integer;
+  ScrollInfo: TScrollInfo;
+begin
+  if AKind = sbHorizontal then
+    BarKind := SB_HORZ
+  else
+    BarKind := SB_VERT;
+  FillChar(ScrollInfo, SizeOf(ScrollInfo), 0);
+  ScrollInfo.cbSize := SizeOf(ScrollInfo);
+  ScrollInfo.fMask := SIF_POS;
+  ScrollInfo.nPos := APos;
+  SetScrollInfo(FOwner.Handle, BarKind, ScrollInfo, ARefresh);
 end;
 
 procedure TSynEditScrollBars.SetScrollBarFromState(const AState: TSynScrollBarState);
@@ -180,7 +205,7 @@ begin
   begin
 
     if not HideEnabled then
-      ScrollInfo.fMask := SIF_ALL or SIF_DISABLENOSCROLL;
+      ScrollInfo.fMask := ScrollInfo.fMask or SIF_DISABLENOSCROLL;
 
     ScrollInfo.nMin := AState.nMin;
     ScrollInfo.nMax := AState.nMax;
@@ -214,7 +239,6 @@ end;
 procedure TSynEditScrollBars.UpdateScrollBarsState;
 var
   MaxScroll: Integer;
-  PageSize: Integer;
 begin
   // Do Horz First
   FNewHorzSBState.Active :=
@@ -226,32 +250,27 @@ begin
   begin
     if FOwner.WordWrap and (eoWrapWithRightEdge in FOwner.Options) then
     begin
-      MaxScroll := (FOwner.WrapAreaWidth div FOwner.CharWidth + 1) * FOwner.CharWidth;
-      PageSize := (FOwner.TextAreaWidth div FOwner.CharWidth) * FOwner.CharWidth;
+      MaxScroll := (FOwner.WrapAreaWidth div FOwner.CharWidth + 1);
     end
     else
     begin
-      // Make sure our values are multiples of CharWidth.
-      MaxScroll :=
-        (CeilOfIntDiv(TSynEditStringList(FOwner.Lines).MaxWidth,
-        FOwner.CharWidth)  + 1) * FOwner.CharWidth;
-      if (eoScrollPastEol in FOwner.Options) then
-        MaxScroll := Max(MaxScroll,
-          (FOwner.LeftChar - 1 + FOwner.TextAreaWidth div FOwner.CharWidth)
-          * FOwner.CharWidth);
-      PageSize := GetHorzPageInChars * FOwner.CharWidth;
+      MaxScroll := (CeilOfIntDiv(TSynEditStringList(FOwner.Lines).MaxWidth,
+        FOwner.CharWidth) + 1);
+      if (eoScrollPastEol in FOwner.Options) or (FOwner.LeftChar > 1) then
+        MaxScroll := Max(MaxScroll + 1,
+          FOwner.LeftChar - 1 + GetHorzPageInChars);  // PastEOL adds 1 to MaxScroll.
     end;
-    FNewHorzSBState.nMin := 0;
-    FNewHorzSBState.nMax := MaxScroll - 1;  // Windows assumes size = nMax - nMin + 1
-    FNewHorzSBState.nPage := Max(FOwner.CharWidth, PageSize);
-    FNewHorzSBState.nPos := (FOwner.LeftChar - 1) * FOwner.CharWidth;
+    FNewHorzSBState.nMin := 1;
+    FNewHorzSBState.nMax := MaxScroll;
+    FNewHorzSBState.nPage := Max(1, GetHorzPageInChars);
+    FNewHorzSBState.nPos := FOwner.LeftChar;
   end;
 
   // Now do Vert
   FNewVertSBState.Active := FOwner.ScrollBars in [TScrollStyle.ssBoth, TScrollStyle.ssVertical];
   if FNewVertSBState.Active then
   begin
-    MaxScroll := FOwner.DisplayLineCount;
+    MaxScroll := FOwner.DisplayRowCount;
     if (eoScrollPastEof in FOwner.Options) then
       Inc(MaxScroll, FOwner.LinesInWindow - 1);
     FNewVertSBState.nMin := 1;
@@ -264,6 +283,8 @@ end;
 function TSynEditScrollBars.UpdateScrollBars: Boolean;
 begin
   // Update the scrollbars from the new state info but only if changed.
+  if FIsScrolling then Exit(False);
+
   Result := False;
   if FOwner.ScrollBars = TScrollStyle.ssNone then
   begin
@@ -285,7 +306,7 @@ begin
   end;
 end;
 
-procedure TSynEditScrollBars.WMHScroll(var AMsg: TWMScroll; var AIsScrolling: Boolean);
+procedure TSynEditScrollBars.WMHScroll(var AMsg: TWMScroll);
 var
   ScrollInfo: TScrollInfo;
 begin
@@ -309,12 +330,16 @@ begin
     SB_THUMBPOSITION,
     SB_THUMBTRACK:
     begin
-      AIsScrolling := True;
+      FIsScrolling := True;
       ScrollInfo := GetBarScrollInfo(sbHorizontal);
-      FOwner.LeftChar := ScrollInfo.nTrackPos div FOwner.CharWidth + 1; // +1 because 0 corresponds to LeftChar = 1
-      OutputDebugString(PChar(ScrollInfo.nTrackPos.ToString));
+      FOwner.LeftChar := ScrollInfo.nTrackPos;
+      SetScrollBarPos(sbHorizontal, ScrollInfo.nTrackPos, False);
     end;
-    SB_ENDSCROLL: AIsScrolling := False;
+    SB_ENDSCROLL:
+    begin
+      FIsScrolling := False;
+      UpdateScrollBars;
+    end;
   end;
   if Assigned(FOwner.OnScroll) then FOwner.OnScroll(Self, sbHorizontal);
 end;
@@ -329,7 +354,7 @@ begin
   Result := ScrollHintWnd;
 end;
 
-procedure TSynEditScrollBars.WMVScroll(var AMsg: TWMScroll; var AIsScrolling: Boolean);
+procedure TSynEditScrollBars.WMVScroll(var AMsg: TWMScroll);
 var
   s: string;
   rc: TRect;
@@ -342,7 +367,7 @@ begin
   case AMsg.ScrollCode of
       // Scrolls to start / end of the text
     SB_TOP: FOwner.TopLine := 1;
-    SB_BOTTOM: FOwner.TopLine := FOwner.DisplayLineCount;
+    SB_BOTTOM: FOwner.TopLine := FOwner.DisplayRowCount;
       // Scrolls one line up / down
     SB_LINEDOWN: FOwner.TopLine := FOwner.TopLine + 1;
     SB_LINEUP: FOwner.TopLine := FOwner.TopLine - 1;
@@ -355,7 +380,7 @@ begin
     SB_THUMBPOSITION,
     SB_THUMBTRACK:
       begin
-        AIsScrolling := True;
+        FIsScrolling := True;
         ScrollInfo := GetBarScrollInfo(sbVertical);
         FOwner.TopLine := ScrollInfo.nTrackPos;
         if eoShowScrollHint in FOwner.Options then
@@ -367,7 +392,7 @@ begin
               s := Format(SYNS_ScrollInfoFmtTop, [FOwner.RowToLine(FOwner.TopLine)]);
             else
               s := Format(SYNS_ScrollInfoFmt, [FOwner.RowToLine(FOwner.TopLine),
-                FOwner.RowToLine(FOwner.TopLine + Min(FOwner.LinesInWindow, FOwner.DisplayLineCount - FOwner.TopLine))]);
+                FOwner.RowToLine(FOwner.TopLine + Min(FOwner.LinesInWindow, FOwner.DisplayRowCount - FOwner.TopLine))]);
           end;
 
           rc := ScrollHint.CalcHintRect(200, s, nil);
@@ -387,16 +412,17 @@ begin
           ScrollHint.ActivateHint(rc, s);
           ScrollHint.Update;
         end;
+        SetScrollBarPos(sbVertical, ScrollInfo.nTrackPos, False);
       end;
       // Ends scrolling
     SB_ENDSCROLL:
       begin
-        AIsScrolling := False;
+        FIsScrolling := False;
         if eoShowScrollHint in FOwner.Options then
           ShowWindow(GetScrollHint.Handle, SW_HIDE);
+        UpdateScrollBars;
       end;
   end;
-  FOwner.Update;  // mjf: Needed?
   if Assigned(FOwner.OnScroll) then FOwner.OnScroll(Self,sbVertical);
 end;
 
@@ -420,7 +446,6 @@ begin
     WheelClicks := FMouseWheelVertAccumulator div WHEEL_DELTA;
     FMouseWheelVertAccumulator := FMouseWheelVertAccumulator mod WHEEL_DELTA;
     FOwner.TopLine := FOwner.TopLine - WheelClicks * LinesToScroll;
-    FOwner.Update;  // mjf: needed?
     if Assigned(FOwner.OnScroll) then FOwner.OnScroll(Self, sbVertical);
   end
   else
@@ -432,7 +457,6 @@ begin
     WheelClicks := FMouseWheelHorzAccumulator div WHEEL_DELTA;
     FMouseWheelHorzAccumulator := FMouseWheelHorzAccumulator mod WHEEL_DELTA;
     FOwner.LeftChar := FOwner.LeftChar - WheelClicks * CharsToScroll;
-    FOwner.Update;  // mjf: needed?
     if Assigned(FOwner.OnScroll) then FOwner.OnScroll(Self, sbHorizontal);
   end;
 end;
